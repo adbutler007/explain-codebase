@@ -1884,6 +1884,7 @@ def screenshots(page: Path, name: str, wanted: list[tuple[str, str]], stem: str 
             try:
                 subprocess.run([chrome, "--headless=new", "--disable-gpu", "--disable-dev-shm-usage",
                                 "--hide-scrollbars", "--window-size=1288,720", "--virtual-time-budget=1500",
+                                "--force-prefers-reduced-motion",   # no fade: the picture is caught as the reader sees it
                                 f"--user-data-dir={profile}", f"--screenshot={shot}", page.as_uri() + address],
                                capture_output=True, timeout=60)
             except (OSError, subprocess.TimeoutExpired):

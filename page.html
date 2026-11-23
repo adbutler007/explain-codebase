@@ -62,6 +62,7 @@
   text.arrow tspan tspan { font-weight: 700; }
   svg text.arrow:not(.on) { opacity: 0; pointer-events: none; }
   svg [data-part], svg [data-arrow] { transition: opacity .15s; }
+  @media (prefers-reduced-motion: reduce) { svg [data-part], svg [data-arrow] { transition: none; } }
   svg.has-flow [data-part]:not(.on), svg.has-flow [data-arrow]:not(.on) { opacity: .38; }
   .arrow.on, .arrow.now { color: var(--ink); }
   .arrow.on .line { stroke-width: 1.6; }
