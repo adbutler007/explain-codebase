@@ -22,7 +22,7 @@ When Chrome is available it checks the open question's labels in every picture (
 ## Install
 
 ```bash
-git clone <this repository> ~/.claude/skills/explain-codebase
+git clone https://github.com/adbutler007/explain-codebase ~/.claude/skills/explain-codebase
 ```
 
 Requirements: Python 3.10 or later, with no third-party packages. [uv](https://docs.astral.sh/uv/) runs the renderer from its script header, and plain `python3` works too. Google Chrome or Chromium is optional. Without it, the screenshots and the browser check are skipped with a note. Set `EXPLAIN_CODEBASE_CHROME` to point at a browser in an unusual place, or `EXPLAIN_CODEBASE_CHROME=none` to skip the browser check and screenshots (for example inside a sandbox where an installed browser cannot start); the renderer then prints "not checked in a browser".
