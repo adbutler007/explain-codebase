@@ -1,0 +1,975 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Tests for render.py: each rule that keeps a map true must refuse the map that breaks it.
+
+    uv run test_render.py
+"""
+from __future__ import annotations
+
+import copy
+import importlib.util
+import io
+import itertools
+import json
+import os
+import random
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest import mock
+
+spec = importlib.util.spec_from_file_location("render", Path(__file__).with_name("render.py"))
+render = importlib.util.module_from_spec(spec)
+sys.modules["render"] = render
+spec.loader.exec_module(render)
+
+GOOD = {
+    "summary": "Takes an order and books its shipment.",
+    "parts": [
+        {"id": "clerk", "label": "Clerk", "kind": "actor"},
+        {"id": "api", "label": "Orders API", "does": "Accepts an order.", "src": ["src/api.py:1-12"]},
+        {"id": "db", "label": "Orders database", "kind": "store", "does": "One row per order.", "src": ["src/schema.sql"]},
+        {"id": "carrier", "label": "Carrier service", "does": "Books the shipment."},
+    ],
+    "flows": [{"question": "What happens when a clerk submits an order?", "steps": [
+        {"from": "clerk", "to": "api", "verb": "posts the order", "src": "src/api.py:1-3"},
+        {"from": "api", "to": "db", "verb": "inserts the order", "src": "src/api.py:5-6"},
+        {"from": "api", "to": "carrier", "verb": "books a shipment", "src": "src/api.py:8-9", "note": "Only when in stock."},
+    ]}],
+}
+
+
+def _make_repo(with_git: bool = True) -> tuple[tempfile.TemporaryDirectory, Path, dict]:
+    """Create a temporary minimal repository (optionally git-initialised) and matching map copy."""
+    tmp = tempfile.TemporaryDirectory()
+    root = Path(tmp.name).resolve()
+    (root / "src").mkdir()
+    (root / "docs").mkdir()
+    (root / "src/api.py").write_text("".join(f"line {i}\n" for i in range(1, 13)), encoding="utf-8")
+    (root / "src/schema.sql").write_text("create table orders (id);\n", encoding="utf-8")
+    m = copy.deepcopy(GOOD)
+    if with_git:
+        subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"], check=True)
+        m["commit"] = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    return tmp, root, m
+
+
+def _run_main(map_path: Path, chrome: str | Path | None = None, env: dict[str, str] | None = None) -> tuple[int, str]:
+    """Invoke render.main() on map_path with isolated Chrome discovery and captured stdout."""
+    buf = io.StringIO()
+    with mock.patch.dict(os.environ, env or {}, clear=False), \
+         mock.patch.object(sys, "argv", ["render.py", str(map_path)]), \
+         redirect_stdout(buf):
+        if env is None or "EXPLAIN_CODEBASE_CHROME" not in env:
+            os.environ.pop("EXPLAIN_CODEBASE_CHROME", None)
+        if env is None or "EXPLAIN_CODEBASE_REQUIRE_CHROME" not in env:
+            os.environ.pop("EXPLAIN_CODEBASE_REQUIRE_CHROME", None)
+        if chrome is not None:
+            with mock.patch.object(render, "CHROME", str(chrome)):
+                rc = render.main()
+        else:
+            rc = render.main()
+    return rc, buf.getvalue()
+
+
+def _probe_dom(payload: dict) -> str:
+    return f'<html><body><script id="label-check-result" type="application/json">{json.dumps(payload)}</script></body></html>'
+
+
+def _two_arrow_geo(ab_label: tuple[float, float, int], cd_label: tuple[float, float, int] = (200.0, 100.0, 1),
+                   x2: float = 200.0, w: float = 400.0, h: float = 250.0,
+                   extra_parts: dict | None = None, extra_boxes: dict | None = None) -> dict:
+    """Synthetic picture with two vertical arrows (a->b at x=100, c->d at x=x2) for unit-testing breaches()."""
+    parts = {"a": (100.0, 30.0, 80.0, 40.0, ["A"]), "b": (100.0, 180.0, 80.0, 40.0, ["B"]), **(extra_parts or {})}
+    boxes = {"a": (60.0, 140.0, 10.0, 50.0), "b": (60.0, 140.0, 160.0, 200.0), **(extra_boxes or {})}
+
+    def v_arrow(x: float, label: tuple[float, float, int]) -> dict:
+        return {
+            "d": f"M{x:.1f},50.0C{x:.1f},101.5 {x:.1f},101.5 {x:.1f},153.0",
+            "head": f"M{x:.1f},160.0l-4.2,-8h8.4z",
+            "head_box": (x - 4.2, x + 4.2, 152.0, 160.0),
+            "pieces": [(x, 50.0, x, 153.0, True)],
+            "bbox": (x - 4.2, x + 4.2, 50.0, 160.0),
+            "label": label,
+        }
+
+    return {"x0": 0.0, "y0": 0.0, "w": w, "h": h, "parts": parts, "boxes": boxes,
+            "arrows": {("a", "b"): v_arrow(100.0, ab_label), ("c", "d"): v_arrow(x2, cd_label)}}
+
+
+class Repo(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp, self.root, self.map = _make_repo(with_git=True)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def git(self, *args: str) -> str:
+        return subprocess.run(["git", "-C", str(self.root), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def commit(self, message: str) -> None:
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", message)
+
+    def errors(self) -> str:
+        errs, _ = render.check(self.map, self.root, True)
+        return "\n".join(errs)
+
+    def test_a_true_map_passes_and_renders_every_part_and_step(self) -> None:
+        errs, ctx = render.check(self.map, self.root, True)
+        self.assertEqual(errs, [])
+        page, counts = render.build(self.map, self.root, ctx)
+        self.assertEqual(counts, {"parts": 4, "flows": 1, "steps": 3, "not established": 0})
+        for text in ("Orders API", "books a shipment", "src/api.py:8-9", "Only when in stock.", self.map["commit"][:7]):
+            self.assertIn(text, page)
+
+    def test_a_citation_must_point_at_lines_that_exist(self) -> None:
+        self.map["flows"][0]["steps"][1]["src"] = "src/api.py:5-60"
+        self.assertIn("has 12 lines", self.errors())
+        self.map["flows"][0]["steps"][1]["src"] = "src/missing.py:1-2"
+        self.assertIn("is not a file", self.errors())
+
+    def test_a_step_cites_a_call_site_not_a_file(self) -> None:
+        self.map["flows"][0]["steps"][1]["src"] = "src/api.py"
+        self.assertIn("cite the lines", self.errors())
+        (self.root / "src/api.py").write_text("x\n" * 100)
+        self.map["flows"][0]["steps"][1]["src"] = "src/api.py:1-90"
+        self.assertIn("cite the call site", self.errors())
+
+    def test_the_part_that_acts_owns_the_step(self) -> None:
+        # evidence for "API inserts the order" taken from the database's file: the classic misattributed arrow
+        self.map["flows"][0]["steps"][1]["src"] = "src/schema.sql:1-1"
+        self.assertIn('not among the code cited by "api"', self.errors())
+
+    def test_a_step_from_outside_cites_the_code_that_receives_it(self) -> None:
+        self.map["flows"][0]["steps"][0]["src"] = "src/schema.sql:1-1"
+        self.assertIn('not among the code cited by "api"', self.errors())
+
+    def test_a_flow_is_connected(self) -> None:
+        steps = self.map["flows"][0]["steps"]
+        steps[1], steps[0] = steps[0], {"from": "db", "to": "carrier", "verb": "jumps"}
+        self.assertIn("neither of which this flow has reached yet", self.errors())
+
+    def test_a_consumer_may_pick_up_from_a_store_the_flow_reached(self) -> None:
+        self.map["parts"].append({"id": "worker", "label": "Worker", "does": "Ships orders.", "src": ["src/schema.sql"]})
+        self.map["flows"][0]["steps"].append({"from": "worker", "to": "db", "verb": "takes new orders"})
+        self.assertEqual(self.errors(), "")
+
+    def test_every_part_is_on_a_route(self) -> None:
+        self.map["parts"].append({"id": "cache", "label": "Cache", "kind": "store", "does": "Unused."})
+        self.assertIn('part "cache" is in no flow', self.errors())
+
+    def test_the_map_stays_small(self) -> None:
+        for i in range(render.MAX_BOXES):
+            self.map["parts"].append({"id": f"p{i}", "label": f"Part {i}", "does": "Extra."})
+        self.assertIn('into "groups"', self.errors())
+        self.map = copy.deepcopy(GOOD) | {"commit": self.map["commit"]}
+        self.map["flows"][0]["steps"][0]["verb"] = "x" * 40
+        self.assertIn('"verb" is 40 characters', self.errors())
+
+    def grouped(self) -> None:
+        self.map["groups"] = [{"id": "office", "label": "Order office", "does": "Takes orders and stores them."}]
+        for p in self.map["parts"][1:3]:
+            p["group"] = "office"
+
+    def test_a_group_is_one_box_in_the_overview_and_opens_into_its_parts(self) -> None:
+        # the reader starts from few boxes; a step inside a group must not draw an arrow until the group is opened
+        self.grouped()
+        errs, ctx = render.check(self.map, self.root, True)
+        self.assertEqual(errs, [])
+        at, nodes, arrows = render.view(self.map["parts"], ctx["groups"], self.map["flows"], None)
+        self.assertEqual([n["id"] for n in nodes], ["clerk", "office", "carrier"])
+        self.assertEqual(set(arrows), {("clerk", "office"), ("office", "carrier")})
+        self.assertEqual(arrows["office", "carrier"]["shown"], [["3 books a shipment"]])     # numbered as in the full flow
+        at, nodes, arrows = render.view(self.map["parts"], ctx["groups"], self.map["flows"], "office")
+        self.assertEqual(set(arrows), {("clerk", "api"), ("api", "db"), ("api", "carrier")})
+        self.assertEqual({n["id"] for n in nodes if n["beside"]}, {"clerk", "carrier"})
+        page, counts = render.build(self.map, self.root, ctx)
+        self.assertEqual(counts["groups"], 1)
+        self.assertIn('data-view="office"', page)
+        self.assertEqual(render.pictures(self.map), [("1", "#1"), ("office", "#office/1")])
+
+    def test_a_group_must_earn_its_box(self) -> None:
+        self.grouped()
+        self.map["parts"][2]["group"] = None
+        self.assertIn('group "office" has 1 parts', self.errors())
+        self.map["parts"][2]["group"] = "nowhere"
+        self.assertIn('"group" names no group', self.errors())
+        for p in self.map["parts"]:
+            p["group"] = "office"
+        self.assertIn("the overview would show no arrows", self.errors())
+
+    def test_a_cited_file_that_changed_since_the_commit_must_be_read_again(self) -> None:
+        (self.root / "src/api.py").write_text("".join(f"changed {i}\n" for i in range(1, 13)))
+        self.commit("second")
+        text = self.errors()
+        self.assertIn("src/api.py changed since", text)
+        self.assertIn('part "api"', text)
+        self.assertNotIn("schema.sql changed", text)
+        self.map["commit"] = self.git("rev-parse", "HEAD")
+        self.assertEqual(self.errors(), "")
+
+    def test_an_unseen_step_is_drawn_dashed_and_listed(self) -> None:
+        del self.map["flows"][0]["steps"][2]["src"]
+        errs, ctx = render.check(self.map, self.root, True)
+        self.assertEqual(errs, [])
+        page, counts = render.build(self.map, self.root, ctx)
+        self.assertEqual(counts["not established"], 1)
+        self.assertIn('class="arrow unseen" data-arrow="api&gt;carrier"', page)
+        self.assertIn("Believed, but not seen in the code.", page)
+
+    def test_uncommitted_changes_to_cited_files_are_declared_on_the_page(self) -> None:
+        (self.root / "src/api.py").write_text("".join(f"edited {i}\n" for i in range(1, 13)))
+        errs, ctx = render.check(self.map, self.root, True)
+        self.assertEqual(errs, [])
+        self.assertEqual(ctx["dirty"], {"src/api.py"})
+        page, _ = render.build(self.map, self.root, ctx)
+        self.assertIn("plus uncommitted changes in 1 cited file.", page)
+
+    def test_citations_link_to_github_only_when_the_commit_is_there(self) -> None:
+        self.git("remote", "add", "origin", "git@github.com:owner/repo.git")
+        self.assertIsNone(render.check(self.map, self.root, True)[1]["base"])       # not pushed
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        errs, ctx = render.check(self.map, self.root, True)
+        page, _ = render.build(self.map, self.root, ctx)
+        self.assertIn(f'https://github.com/owner/repo/blob/{self.map["commit"]}/src/api.py#L5-L6', page)
+
+    def test_nothing_is_written_while_the_map_is_wrong(self) -> None:
+        self.map["flows"][0]["steps"][1]["src"] = "src/api.py:5-60"
+        path = self.root / "docs/how-it-works.json"
+        path.write_text(json.dumps(self.map))
+        script = Path(__file__).with_name("render.py")
+        r = subprocess.run([sys.executable, str(script), str(path)], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("nothing written", r.stdout)
+        self.assertFalse(path.with_suffix(".html").exists())
+
+
+class Layout(unittest.TestCase):
+    """Whatever the shape of the graph, parts stay apart and inside the picture."""
+
+    SHAPES = {
+        "chain": [("a", "b"), ("b", "c"), ("c", "d")],
+        "loop": [("a", "b"), ("b", "c"), ("c", "a")],
+        "both ways": [("a", "b"), ("b", "a"), ("a", "c")],
+        "hub": [("in", "hub")] + [("hub", f"s{i}") for i in range(9)] + [(f"s{i}", "db") for i in range(9)],
+        "two hubs": [(f"s{i}", h) for i in range(5) for h in ("db", "bus")] + [("x", "s0"), ("db", "bus")],
+        "alone": [("a", "b")],      # plus a box no arrow touches: a group whose steps are all inside it
+    }
+
+    def test_parts_do_not_overlap_and_fit(self) -> None:
+        for name, pairs in self.SHAPES.items():
+            with self.subTest(name):
+                ids = list(dict.fromkeys(itertools.chain.from_iterable(pairs))) + ["lone"] * (name == "alone")
+                parts = [{"id": i, "label": f"Part {i}", "kind": "store" if i == "db" else "code",
+                          "sub": "3 parts" if i in ("hub", "lone") else None} for i in ids]
+                arrows = {p: {"label_sizes": [(60.0, 18.0)], "label_w": 60.0} for p in pairs}
+                geo = render.layout(parts, arrows)
+                boxes = {i: (x - w / 2, y - h / 2, x + w / 2, y + h / 2) for i, (x, y, w, h, _) in geo["parts"].items()}
+                for b in boxes.values():
+                    self.assertTrue(b[0] >= geo["x0"] and b[1] >= 0 and b[2] <= geo["x0"] + geo["w"] and b[3] <= geo["h"], b)
+                for (i, p), (j, q) in itertools.combinations(boxes.items(), 2):
+                    apart = p[2] <= q[0] or q[2] <= p[0] or p[3] <= q[1] or q[3] <= p[1]
+                    self.assertTrue(apart, f"{i} overlaps {j}")
+                self.assertEqual(set(geo["arrows"]), set(pairs))
+
+    def test_labels_of_one_flow_keep_apart(self) -> None:
+        """Labels shown together must not cover each other or a part: the reader could not tell whose they are.
+
+        The shape is the one where they once did: two parts acting on one, three steps on one arrow.
+        """
+        pairs = [("person", "site"), ("jobs", "site"), ("jobs", "app"), ("site", "store"), ("app", "store")]
+        parts = [{"id": i, "label": f"Part {i}", "kind": "code", "sub": None} for i in ("person", "jobs", "site", "app", "store")]
+        sizes = {("jobs", "site"): (150.0, 50.0), ("site", "store"): (130.0, 50.0)}
+        arrows = {p: {"label_sizes": [sizes.get(p, (110.0, 20.0))], "label_w": sizes.get(p, (110.0, 20.0))[0]} for p in pairs}
+        geo = render.layout(parts, arrows)
+
+        def label(p):
+            (lx, ly, side), (w, h) = geo["arrows"][p]["label"], arrows[p]["label_sizes"][0]
+            x0 = lx - w / 2 if side == 0 else lx + 6 if side > 0 else lx - 6 - w
+            return x0, ly - h / 2, x0 + w, ly + h / 2
+
+        boxes = {i: (x - w / 2, y - h / 2, x + w / 2, y + h / 2) for i, (x, y, w, h, _) in geo["parts"].items()}
+        shapes = [(f"label {p}", label(p)) for p in pairs] + [(f"part {i}", b) for i, b in boxes.items()]
+        for (i, p), (j, q) in itertools.combinations(shapes, 2):
+            apart = p[2] <= q[0] or q[2] <= p[0] or p[3] <= q[1] or q[3] <= p[1]
+            self.assertTrue(apart or (i.startswith("part") and j.startswith("part")), f"{i} overlaps {j}")
+
+
+def _prep_fixture(path: Path) -> tuple[list[dict], dict[str, dict], list[dict]]:
+    """Fill the derived fields check() adds so real fixture maps can be laid out without their repos."""
+    m = json.loads(path.read_text(encoding="utf-8"))
+    parts = m["parts"]
+    groups = {g["id"]: dict(g) for g in m.get("groups") or []}
+    for p in parts:
+        p.setdefault("kind", "code")
+        p.setdefault("group", None)
+        src = p.get("src") or []
+        p["_src"] = [render.Cite(s, None, None) for s in ([src] if isinstance(src, str) else src)]
+    for gid, g in groups.items():
+        g["_parts"] = [p["id"] for p in parts if p.get("group") == gid]
+    for f in m["flows"]:
+        for s in f["steps"]:
+            s["_src"] = render.Cite(s["src"], 1, 1) if s.get("src") else None
+    return parts, groups, m["flows"]
+
+
+def _random_case(rng: random.Random, family: str) -> tuple[list[dict], dict[tuple[str, str], dict]]:
+    """Build one seeded random graph with 1..4 flows and labels 1..6 lines tall, 40..220 px wide."""
+    n = rng.randint(4, 10)
+    ids = [f"p{i}" for i in range(n)]
+    edges: set[tuple[str, str]] = set()
+    if family == "chain":
+        for i in range(n - 1):
+            edges.add((ids[i], ids[i + 1]))
+        for _ in range(rng.randint(1, 3)):
+            a, b = rng.sample(ids, 2)
+            edges.add((a, b))
+    elif family == "hub":
+        hub = ids[0]
+        for i in ids[1:]:
+            edges.add((hub, i) if rng.random() < 0.7 else (i, hub))
+        for _ in range(rng.randint(0, 3)):
+            a, b = rng.sample(ids[1:], 2)
+            edges.add((a, b))
+    elif family == "fan_in":
+        sink = ids[-1]
+        for i in ids[:-1]:
+            edges.add((i, sink))
+        for i in range(n - 2):
+            if rng.random() < 0.4:
+                edges.add((ids[i], ids[i + 1]))
+    elif family == "fan_out":
+        root = ids[0]
+        for i in ids[1:]:
+            edges.add((root, i))
+        for i in range(1, n - 1):
+            if rng.random() < 0.4:
+                edges.add((ids[i], ids[i + 1]))
+    elif family == "both_dirs":
+        for i in range(n - 1):
+            edges.add((ids[i], ids[i + 1]))
+            if rng.random() < 0.6:
+                edges.add((ids[i + 1], ids[i]))
+        a, b = ids[0], ids[1]
+        edges.add((a, b))
+        edges.add((b, a))
+        for _ in range(rng.randint(0, 2)):
+            u, v = rng.sample(ids, 2)
+            edges.add((u, v))
+            edges.add((v, u))
+    elif family == "long_arrows":
+        n = rng.randint(5, 9)
+        ids = [f"p{i}" for i in range(n)]
+        for i in range(n - 1):
+            edges.add((ids[i], ids[i + 1]))
+        for _ in range(rng.randint(2, 5)):
+            i = rng.randint(0, n - 3)
+            j = rng.randint(i + 2, n - 1)
+            edges.add((ids[i], ids[j]) if rng.random() < 0.8 else (ids[j], ids[i]))
+    elif family == "double_hub":
+        n = rng.randint(6, 10)
+        ids = [f"p{i}" for i in range(n)]
+        h1, h2 = ids[0], ids[-1]
+        mid = ids[1:-1]
+        for m in mid:
+            edges.add((h1, m))
+            edges.add((m, h2))
+        if rng.random() < 0.5:
+            edges.add((h1, h2))
+    else:  # mixed
+        for i in range(n - 1):
+            edges.add((ids[i], ids[i + 1]))
+        target = min(14, n + rng.randint(1, 6))
+        while len(edges) < target:
+            a, b = rng.sample(ids, 2)
+            edges.add((a, b))
+
+    pairs = sorted(edges)
+    n_flows = rng.randint(1, 4)
+    # Assign each edge to at least one flow, capping steps per flow like real maps (<= MAX_STEPS).
+    per_flow: list[list[tuple[str, str]]] = [[] for _ in range(n_flows)]
+    for pair in pairs:
+        k = rng.randint(1, min(n_flows, 2))
+        for fi in rng.sample(range(n_flows), k):
+            if len(per_flow[fi]) < 12:
+                per_flow[fi].append(pair)
+    for fi in range(n_flows):
+        if not per_flow[fi]:
+            per_flow[fi].append(rng.choice(pairs))
+    arrows: dict[tuple[str, str], dict] = {}
+    for pair in pairs:
+        sizes: list[tuple[float, float] | None] = []
+        shown: list[list[str]] = []
+        for fi in range(n_flows):
+            if pair in per_flow[fi]:
+                lines = rng.randint(1, 6)
+                w = round(rng.uniform(40.0, 220.0), 1)
+                h = render.LINE * lines + 5.0
+                sizes.append((w, h))
+                shown.append([f"{j + 1} step" for j in range(lines)])
+            else:
+                sizes.append(None)
+                shown.append([])
+        if not any(sizes):
+            lines = rng.randint(1, 6)
+            sizes[0] = (round(rng.uniform(40.0, 220.0), 1), render.LINE * lines + 5.0)
+            shown[0] = [f"{j + 1} step" for j in range(lines)]
+        arrows[pair] = {
+            "label_sizes": sizes,
+            "label_w": max(s[0] for s in sizes if s),
+            "shown": shown,
+        }
+    parts = [
+        {
+            "id": i,
+            "label": f"Part {i}",
+            "kind": rng.choice(render.KINDS),
+            "sub": "3 parts" if idx == 0 and rng.random() < 0.25 else None,
+            "opens": idx == 0 and rng.random() < 0.25,
+        }
+        for idx, i in enumerate(ids)
+    ]
+    for p in parts:
+        if p["opens"]:
+            p["sub"] = "3 parts"
+    return parts, arrows
+
+
+class LabelRule(unittest.TestCase):
+    """Shared rule checker, real fixture maps, refusal, browser check, and seeded random graphs."""
+
+    FAMILIES = ("chain", "hub", "fan_in", "fan_out", "both_dirs", "long_arrows", "double_hub", "mixed")
+
+    def test_breaches_enforces_all_four_clauses_and_margin(self) -> None:
+        extra_parts = {"dim": (280.0, 100.0, 60.0, 40.0, ["Dim"]), "grp": (280.0, 180.0, 80.0, 40.0, ["Grp"])}
+        extra_boxes = {"dim": (250.0, 310.0, 80.0, 120.0), "grp": (240.0, 325.0, 160.0, 205.0)}  # +5 group stack
+        mk_geo = lambda ab, cd=(200.0, 100.0, 1): _two_arrow_geo(ab, cd, extra_parts=extra_parts, extra_boxes=extra_boxes)
+
+        arrows_same = {
+            ("a", "b"): {"label_sizes": [(80.0, 20.0)], "label_w": 80.0},
+            ("c", "d"): {"label_sizes": [(80.0, 20.0)], "label_w": 80.0},
+        }
+        self.assertEqual(render.breaches(mk_geo((100.0, 100.0, 1), (200.0, 65.0, 1)), arrows_same, "ov"), [])
+
+        # Clause 1: label vs label within MARGIN (3 px).
+        bs = render.breaches(mk_geo((100.0, 100.0, 1), (194.0, 100.0, -1)), arrows_same, "ov")
+        self.assertIn(render.Breach("ov", 0, ("label", ("a", "b")), ("label", ("c", "d"))), bs)
+
+        # Clause 2: label vs dimmed part and group +5 stack shadow within MARGIN.
+        self.assertIn(render.Breach("ov", 0, ("label", ("a", "b")), ("part", "dim")),
+                      render.breaches(mk_geo((162.0, 100.0, 1), (200.0, 65.0, 1)), arrows_same, "ov"))
+        self.assertIn(render.Breach("ov", 0, ("label", ("a", "b")), ("part", "grp")),
+                      render.breaches(mk_geo((250.0, 217.0, 1), (200.0, 65.0, 1)), arrows_same, "ov"))
+
+        # Clause 3: label vs other arrow in same flow breaches, but arrow only in another flow does not.
+        arrows_wide_same = {("a", "b"): {"label_sizes": [(92.0, 20.0)], "label_w": 92.0},
+                            ("c", "d"): {"label_sizes": [(40.0, 20.0)], "label_w": 40.0}}
+        arrows_diff_flow = {("a", "b"): {"label_sizes": [(92.0, 20.0), None], "label_w": 92.0},
+                            ("c", "d"): {"label_sizes": [None, (40.0, 20.0)], "label_w": 40.0}}
+        g_near = mk_geo((100.0, 100.0, 1), (200.0, 65.0, 1))
+        self.assertIn(render.Breach("ov", 0, ("label", ("a", "b")), ("arrow", ("c", "d"))),
+                      render.breaches(g_near, arrows_wide_same, "ov"))
+        self.assertEqual(render.breaches(g_near, arrows_diff_flow, "ov"), [])
+
+        # Clause 4: side == 0 (on its own line) always breaches own arrow.
+        bs = render.breaches(mk_geo((100.0, 100.0, 0), (200.0, 65.0, 1)), arrows_same, "ov")
+        self.assertIn(render.Breach("ov", 0, ("label", ("a", "b")), ("arrow", ("a", "b"))), bs)
+
+    def test_unplaceable_map_is_refused_and_writes_nothing(self) -> None:
+        # 1) A genuinely impossible label (wider than bounded horizontal spacing between flanking vertical arrows) is refused.
+        parts = [{"id": i, "label": f"Part {i}", "kind": "code", "sub": None} for i in ("a", "b0", "b1", "b2", "b3", "c")]
+        pairs = [("a", f"b{i}") for i in range(4)] + [(f"b{i}", "c") for i in range(4)]
+        arrows = {
+            p: {
+                "label_sizes": [(650.0, 40.0) if p == ("a", "b1") else (80.0, 20.0)],
+                "label_w": 650.0 if p == ("a", "b1") else 80.0,
+                "shown": [["1 impossibly wide verb"] if p == ("a", "b1") else ["2 step"]],
+            }
+            for p in pairs
+        }
+        _, bs = render.choose_layout(parts, arrows, "")
+        self.assertTrue(bs, "expected refusal when a label is wider than bounded horizontal room")
+
+        # 2) In main(), layout breaches print error: lines with picture, question, steps and fix hint, write nothing, exit 1.
+        tmp, root, m = _make_repo(with_git=False)
+        try:
+            path = root / "docs/how-it-works.json"
+            path.write_text(json.dumps(m), encoding="utf-8")
+            fake_b = [render.Breach("", 0, ("label", ("api", "db")), ("label", ("api", "carrier")))]
+            with mock.patch.object(render, "choose_layout", side_effect=lambda n, a, p="": ({}, fake_b)):
+                rc, out = _run_main(path)
+            self.assertEqual(rc, 1)
+            for snippet in ("error: overview, question 1:", "2 inserts the order", "3 books a shipment", "shorter verbs", "nothing written"):
+                self.assertIn(snippet, out)
+            self.assertFalse(path.with_suffix(".html").exists())
+        finally:
+            tmp.cleanup()
+
+    def test_browser_check_probe_parse_degrade_and_error(self) -> None:
+        # Probe injection leaves delivered HTML clean and adds probe only to the temporary copy.
+        sample_html = "<!doctype html><html><body>ok</body></html>"
+        probed = render.browser_probe_html(sample_html)
+        self.assertNotIn("label-check-result", sample_html)
+        for token in ("label-check-result", "getBBox", "getPointAtLength"):
+            self.assertIn(token, probed)
+
+        # Parsing --dump-dom output: clean, breaching (with reordered attributes), and missing/bad.
+        clean_dom = '<html><body><script type="application/json" id="label-check-result">{"checked":true,"breaches":[]}</script></body></html>'
+        self.assertEqual(render.parse_browser_check(clean_dom), [])
+        breach_item = {"picture": "", "flow": 0, "kind": "part", "a": "api>db", "a_text": "2 inserts the order", "b": "db"}
+        self.assertEqual(render.parse_browser_check(_probe_dom({"checked": True, "breaches": [breach_item]})), [breach_item])
+        self.assertIsNone(render.parse_browser_check("<html><body>no result</body></html>"))
+
+        # Degrades cleanly when Chrome is missing, and exits non-zero without writing when browser finds a breach.
+        tmp, root, m = _make_repo(with_git=False)
+        try:
+            path = root / "docs/how-it-works.json"
+            path.write_text(json.dumps(m), encoding="utf-8")
+
+            rc, out = _run_main(path, chrome=root / "no-such-chrome")
+            self.assertEqual(rc, 0)
+            self.assertIn("not checked in a browser", out)
+            self.assertTrue(path.with_suffix(".html").exists())
+            self.assertNotIn("label-check-result", path.with_suffix(".html").read_text(encoding="utf-8"))
+
+            path.with_suffix(".html").unlink()
+            with mock.patch.object(render, "screenshots", return_value=[]), \
+                 mock.patch.object(render, "browser_check", return_value=[breach_item]):
+                rc2, out2 = _run_main(path)
+            self.assertEqual(rc2, 1)
+            for snippet in ("error: overview, question 1 (browser):", "2 inserts the order", "text_w()", "nothing written"):
+                self.assertIn(snippet, out2)
+            self.assertFalse(path.with_suffix(".html").exists())
+        finally:
+            tmp.cleanup()
+
+    def test_fixtures_have_no_label_breaches(self) -> None:
+        fixtures_dir = Path(__file__).with_name("fixtures")
+        for fname in ("dense-1.json", "dense-2.json", "dense-3.json", "dense-4.json"):    # four real-width synthetic maps
+            parts, groups, flows = _prep_fixture(fixtures_dir / fname)
+            for name in [None, *groups]:
+                with self.subTest(fixture=fname, picture=name or "overview"):
+                    _, nodes, arrows = render.view(parts, groups, flows, name)
+                    geo, bs = render.choose_layout(nodes, arrows, name or "")
+                    self.assertEqual(bs, [], f"{fname} {name or 'overview'} had {len(bs)} breach(es): {bs[:3]}")
+                    self.assertEqual(render.breaches(geo, arrows, name or ""), [])
+                    self.assertGreaterEqual(
+                        render.scale(geo), 0.85,
+                        f"{fname} {name or 'overview'} shrank to scale {render.scale(geo):.2f} ({geo['w']:.1f}x{geo['h']:.1f})",
+                    )
+
+    def test_random_graphs_either_clean_or_refused(self) -> None:
+        rng = random.Random(20261123)
+        total = 120
+        refused = []
+        for idx in range(total):
+            family = self.FAMILIES[idx % len(self.FAMILIES)]
+            parts, arrows = _random_case(rng, family)
+            geo, bs = render.choose_layout(parts, arrows, f"{family}-{idx}")
+            if bs:
+                refused.append((idx, family, len(bs)))
+            else:
+                self.assertEqual(render.breaches(geo, arrows, f"{family}-{idx}"), [])
+                boxes = {i: (x - w / 2, y - h / 2, x + w / 2, y + h / 2)
+                         for i, (x, y, w, h, _) in geo["parts"].items()}
+                for (i, p), (j, q) in itertools.combinations(boxes.items(), 2):
+                    apart = p[2] <= q[0] or q[2] <= p[0] or p[3] <= q[1] or q[3] <= p[1]
+                    self.assertTrue(apart, f"case {idx} ({family}): {i} overlaps {j}")
+        self.assertLessEqual(len(refused), 6, f"too many refused ({len(refused)}/{total}): {refused[:10]}")
+
+
+class SafetyAndContract(unittest.TestCase):
+    """Safety on untrusted repositories, geometry invariants, fail-closed browser checks, docs and CI rules."""
+
+    def test_writes_stay_in_repo_never_follow_symlinks_respect_umask_and_private_shots(self) -> None:
+        tmp, root, m = _make_repo()
+        outside = tempfile.TemporaryDirectory()
+        try:
+            secret = Path(outside.name).resolve() / "secret.txt"
+            secret.write_text("KEEP ME", encoding="utf-8")
+            os.chmod(secret, 0o600)
+            map_path = root / "docs/how-it-works.json"
+            map_path.write_text(json.dumps(m), encoding="utf-8")
+            no_chrome = root / "no-chrome"
+
+            # Planted symlink at .html.tmp must not overwrite target; output respects restrictive umask.
+            (root / "docs/how-it-works.html.tmp").symlink_to(secret)
+            old_umask = os.umask(0o077)
+            try:
+                rc, out = _run_main(map_path, chrome=no_chrome)
+            finally:
+                os.umask(old_umask)
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(secret.read_text(encoding="utf-8"), "KEEP ME")
+            self.assertEqual(stat.S_IMODE(secret.stat().st_mode), 0o600)
+            out_html = root / "docs/how-it-works.html"
+            self.assertEqual(stat.S_IMODE(out_html.stat().st_mode), 0o600)
+
+            # Symlinked output path is refused without touching the target.
+            out_html.unlink()
+            out_html.symlink_to(secret)
+            self.assertEqual(_run_main(map_path, chrome=no_chrome)[0], 1)
+            self.assertEqual(secret.read_text(encoding="utf-8"), "KEEP ME")
+            out_html.unlink()
+
+            # Symlinked input map or parent directory resolving outside repo is refused.
+            outside_map = Path(outside.name).resolve() / "ext.json"
+            outside_map.write_text(json.dumps(m), encoding="utf-8")
+            sym_map = root / "docs/linked.json"
+            sym_map.symlink_to(outside_map)
+            sym_docs = root / "linked_docs"
+            sym_docs.symlink_to(Path(outside.name).resolve())
+            for bad_input in (sym_map, sym_docs / "ext.json"):
+                self.assertEqual(_run_main(bad_input, chrome=no_chrome)[0], 1)
+                self.assertFalse(outside_map.with_suffix(".html").exists())
+
+            # screenshots() uses a fresh private (0o700) temp folder per run.
+            fake_chrome = root / "fake-chrome"
+            fake_chrome.write_text("", encoding="utf-8")
+            page_file = root / "docs/tmp.html"
+            page_file.write_text("<html></html>", encoding="utf-8")
+
+            def fake_run(cmd, **kw):
+                for arg in cmd:
+                    if arg.startswith("--screenshot="):
+                        Path(arg.split("=", 1)[1]).write_bytes(b"png")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            with mock.patch.object(render, "CHROME", str(fake_chrome)), \
+                 mock.patch.object(subprocess, "run", side_effect=fake_run):
+                s1 = render.screenshots(page_file, "repo", [("1", "#1")])
+                s2 = render.screenshots(page_file, "repo", [("1", "#1")])
+            self.assertTrue(s1 and s2)
+            self.assertNotEqual(s1[0].parent, Path(tempfile.gettempdir()) / "explain-codebase")
+            self.assertNotEqual(s1[0].parent, s2[0].parent)
+            self.assertEqual(stat.S_IMODE(s1[0].parent.stat().st_mode), 0o700)
+            for p in s1 + s2:
+                p.unlink(missing_ok=True)
+                p.parent.rmdir()
+        finally:
+            tmp.cleanup()
+            outside.cleanup()
+
+    def test_reads_stay_inside_repo_and_bound_size(self) -> None:
+        tmp, root, m = _make_repo()
+        outside = tempfile.TemporaryDirectory()
+        try:
+            ext_file = Path(outside.name).resolve() / "secret.py"
+            ext_file.write_text("a\nb\nc\n", encoding="utf-8")
+            (root / "src/leak.py").symlink_to(ext_file)
+            (root / "src/extdir").symlink_to(Path(outside.name).resolve())
+
+            # File symlink escaping repo is refused without disclosing line count; directory symlink refused too.
+            for src_entry in ("src/leak.py:99-99", "src/extdir"):
+                mc = copy.deepcopy(m)
+                mc["parts"][1]["src"] = ["src/api.py:1-12", src_entry]
+                errs, _ = render.check(mc, root, True)
+                self.assertTrue(errs)
+                self.assertNotIn("has 3 lines", "\n".join(errs))
+
+            # Oversized cited file is refused by MAX_FILE_BYTES.
+            (root / "src/big.py").write_bytes(b"x\n" * 1000)
+            m3 = copy.deepcopy(m)
+            m3["parts"][1]["src"] = ["src/api.py:1-12", "src/big.py:1-2"]
+            with mock.patch.object(render, "MAX_FILE_BYTES", 500):
+                self.assertTrue(render.check(m3, root, True)[0])
+        finally:
+            tmp.cleanup()
+            outside.cleanup()
+
+    def test_html_escaping_github_base_and_csp(self) -> None:
+        tmp, root, m = _make_repo()
+        try:
+            evil_url = 'https://github.com/owner/repo"><img src=x onerror=alert(1)>'
+            subprocess.run(["git", "-C", str(root), "remote", "add", "origin", evil_url], check=True)
+            subprocess.run(["git", "-C", str(root), "update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+            self.assertIsNone(render.github_base(root, m["commit"]))
+
+            errs, ctx = render.check(m, root, True)
+            self.assertEqual(errs, [])
+            page, _ = render.build(m, root, ctx)
+            self.assertNotIn("onerror=alert(1)", page)
+            self.assertIn('http-equiv="Content-Security-Policy"', page)
+            self.assertIn("default-src 'none'", page)
+
+            ctx["base"] = 'https://github.com/o/r" onclick="x'
+            self.assertNotIn('" onclick="', render.build(m, root, ctx)[0])
+        finally:
+            tmp.cleanup()
+
+    def test_git_hardened_flags_timeout_and_hex_commit(self) -> None:
+        tmp, root, m = _make_repo()
+        try:
+            seen_cmds, seen_timeouts = [], []
+            real_run = subprocess.run
+
+            def spy(cmd, *a, **kw):
+                seen_cmds.append(cmd)
+                seen_timeouts.append(kw.get("timeout"))
+                return real_run(cmd, *a, **kw)
+
+            with mock.patch.object(subprocess, "run", side_effect=spy):
+                render.git(root, "rev-parse", "HEAD")
+            self.assertIn("core.fsmonitor=false", " ".join(seen_cmds[0]))
+            self.assertGreater(seen_timeouts[0], 0)
+
+            for bad_commit in ("HEAD", "main", "abc12", "--all", "zzzzzzz"):
+                m_bad = copy.deepcopy(m)
+                m_bad["commit"] = bad_commit
+                self.assertTrue(render.check(m_bad, root, True)[0], f"expected commit {bad_commit!r} to be refused")
+        finally:
+            tmp.cleanup()
+
+    def test_strict_text_w_viewbox_highlighter_and_hover(self) -> None:
+        # CJK, emoji and wide ASCII keep realistic widths; primary-font Latin stays calibrated to Avenir Next/Segoe UI.
+        self.assertGreaterEqual(render.text_w("設定を読む", 12), 5 * 12.0)
+        self.assertGreaterEqual(render.text_w("🚀", 12), 12.0)
+        self.assertGreaterEqual(render.text_w("@" * 10, 12), 10 * 12.0 * 0.95)
+        self.assertGreaterEqual(render.text_w("m" * 10, 12), 10 * 12.0 * 0.88)
+        jp_parts = [{"id": "a", "label": "設定マネージャ", "kind": "code", "sub": None},
+                    {"id": "b", "label": "検証サービス", "kind": "code", "sub": None}]
+        jp_w = render.step_w("1 設定を読む", 12) + 6
+        jp_geo = render.layout(jp_parts, {("a", "b"): {"label_sizes": [(jp_w, 20.0)], "label_w": jp_w}})
+        self.assertGreaterEqual(jp_geo["parts"]["a"][2], render.text_w("設定マネージャ", render.FS) + 38)
+
+        # Highlighter clearance (ARROW_MARGIN = 7.5 px) and viewBox edge containment.
+        geo = _two_arrow_geo((100.0, 100.0, 1), (180.0, 100.0, 1), x2=180.0, w=300.0, h=200.0)
+        gap = getattr(render, "LABEL_GAP", 6.0)
+        arrows = {("a", "b"): {"label_sizes": [(75.0 - gap, 20.0)], "label_w": 75.0 - gap},
+                  ("c", "d"): {"label_sizes": [(40.0, 20.0)], "label_w": 40.0}}
+        self.assertIn(render.Breach("ov", 0, ("label", ("a", "b")), ("arrow", ("c", "d"))),
+                      render.breaches(geo, arrows, "ov"))
+
+        arrows_edge = {("a", "b"): {"label_sizes": [(40.0, 20.0)], "label_w": 40.0},
+                       ("c", "d"): {"label_sizes": [(150.0, 20.0)], "label_w": 150.0}}
+        self.assertTrue(any(b.b[0] == "edge" for b in render.breaches(geo, arrows_edge, "ov")))
+        self.assertIn("viewBox", render.BROWSER_PROBE)
+
+        # Pointing at a part lights arrow lines only (g[data-arrow]), not unchecked labels.
+        self.assertIn("all('g[data-arrow]', svg)", Path(__file__).with_name("page.html").read_text(encoding="utf-8"))
+
+    def test_browser_check_fails_closed_writes_nothing_and_uses_segments(self) -> None:
+        tmp, root, m = _make_repo()
+        try:
+            map_path = root / "docs/how-it-works.json"
+            map_path.write_text(json.dumps(m), encoding="utf-8")
+            out_html = map_path.with_suffix(".html")
+            fake_chrome = root / "fake-chrome"
+            fake_chrome.write_text("", encoding="utf-8")
+
+            # Broken EXPLAIN_CODEBASE_CHROME and EXPLAIN_CODEBASE_REQUIRE_CHROME with no browser must fail closed.
+            self.assertEqual(_run_main(map_path, env={"EXPLAIN_CODEBASE_CHROME": str(root / "missing-chrome")})[0], 1)
+            self.assertFalse(out_html.exists())
+            self.assertEqual(_run_main(map_path, chrome=root / "no-chrome", env={"EXPLAIN_CODEBASE_REQUIRE_CHROME": "1"})[0], 1)
+            self.assertFalse(out_html.exists())
+
+            # Non-zero Chrome exit, browser-reported breach, and probe JS error each exit 1 and write nothing.
+            breach_dom = _probe_dom({"checked": True, "breaches": [{"picture": "", "flow": 0, "kind": "part", "a": "api>db", "a_text": "2 inserts", "b": "db"}]})
+            err_dom = _probe_dom({"checked": False, "error": "ReferenceError: read is not defined", "breaches": []})
+            for result, expected in (
+                (subprocess.CompletedProcess([], 1, "", "crash"), ""),
+                (subprocess.CompletedProcess([], 0, breach_dom, ""), "nothing written"),
+                (subprocess.CompletedProcess([], 0, err_dom, ""), "ReferenceError"),
+            ):
+                with mock.patch.object(subprocess, "run", return_value=result):
+                    rc, out = _run_main(map_path, chrome=fake_chrome)
+                self.assertEqual(rc, 1)
+                self.assertFalse(out_html.exists())
+                if expected:
+                    self.assertIn(expected, out)
+
+            self.assertIn("try {", render.BROWSER_PROBE)
+            self.assertNotIn("ptNear", render.BROWSER_PROBE)
+        finally:
+            tmp.cleanup()
+
+    def test_opened_group_max_boxes_beside_steps_and_min_scale(self) -> None:
+        tmp, root, m = _make_repo()
+        try:
+            # Group of 7 parts touching 4 outside boxes = 11 boxes in opened group -> refused by check().
+            m_big = {
+                "commit": m["commit"], "summary": "Big group test.",
+                "groups": [{"id": "grp", "label": "Big group", "does": "Seven parts."}],
+                "parts": (
+                    [{"id": f"in{i}", "label": f"In {i}", "group": "grp", "does": "Inside.", "src": ["src/api.py"]} for i in range(7)]
+                    + [{"id": f"out{i}", "label": f"Out {i}", "kind": "actor"} for i in range(4)]
+                ),
+                "flows": [{"question": "How does it flow?", "steps": (
+                    [{"from": "out0", "to": "in0", "verb": "starts"}]
+                    + [{"from": f"in{i}", "to": f"in{i + 1}", "verb": "next"} for i in range(6)]
+                    + [{"from": f"in{i}", "to": f"out{i}", "verb": f"calls {i}"} for i in (1, 2, 3)]
+                )}],
+            }
+            errs, _ = render.check(m_big, root, True)
+            self.assertTrue(any("11 boxes" in e or f"up to {render.MAX_BOXES}" in e for e in errs), errs)
+
+            # Opened group view maps every member part of closed beside-groups.
+            parts, groups, flows = _prep_fixture(Path(__file__).parent / "fixtures/dense-1.json")
+            at, _, _ = render.view(parts, groups, flows, "g2")
+            for pid in groups["g1"]["_parts"]:
+                self.assertEqual(at.get(pid), "g1", f"member {pid} of beside-group g1 missing from at")
+
+            # build() refuses a picture whose scale() < MIN_SCALE (0.6).
+            errs0, ctx0 = render.check(m, root, True)
+            self.assertEqual(errs0, [])
+            tiny_geo = {"x0": 0.0, "w": 2000.0, "h": 1500.0, "arrows": {}, "parts": {p["id"]: (0, 0, 10, 10, ["x"]) for p in m["parts"]}}
+            with mock.patch.object(render, "choose_layout", return_value=(tiny_geo, [])):
+                with self.assertRaises(render.LayoutError) as cm:
+                    render.build(m, root, ctx0)
+            self.assertIn("0.6", "\n".join(cm.exception.errors))
+        finally:
+            tmp.cleanup()
+
+    def test_malformed_map_types_and_limits_never_crash(self) -> None:
+        tmp, root, m = _make_repo()
+        try:
+            cases = [
+                lambda x: x.__setitem__("parts", "not-a-list"),
+                lambda x: x.__setitem__("flows", {"bad": 1}),
+                lambda x: x.__setitem__("groups", {"g": {"id": "g", "label": "G", "does": "D"}}),
+                lambda x: x.__setitem__("unknowns", 123),
+                lambda x: x.__setitem__("unknowns", [""]),
+                lambda x: x.__setitem__("unknowns", ["x" * 500]),
+                lambda x: x.__setitem__("title", 123),
+                lambda x: x.__setitem__("title", "x" * 120),
+                lambda x: x["parts"][1].__setitem__("src", 123),
+                lambda x: x["parts"][1].__setitem__("src", {"src/api.py": "1-2"}),
+                lambda x: x["parts"][1].__setitem__("group", ["office"]),
+                lambda x: x["flows"][0]["steps"][0].__setitem__("from", ["clerk"]),
+                lambda x: x["flows"][0]["steps"][0].__setitem__("to", {"id": "api"}),
+            ]
+            for idx, mutate in enumerate(cases):
+                with self.subTest(case=idx):
+                    mc = copy.deepcopy(m)
+                    mutate(mc)
+                    self.assertTrue(render.check(mc, root, True)[0], f"malformed case {idx} should return errors")
+        finally:
+            tmp.cleanup()
+
+    def test_page_script_safety_and_toolbar_wrap(self) -> None:
+        tpl = Path(__file__).with_name("page.html").read_text(encoding="utf-8")
+        self.assertIn("Object.hasOwn(views", tpl)
+        self.assertRegex(tpl, r"try\s*\{[^}]*decodeURIComponent")
+        bar_css = re.search(r"\.bar\s*\{([^}]*)\}", tpl)
+        self.assertIsNotNone(bar_css)
+        self.assertIn("flex-wrap: wrap", bar_css[1])
+        self.assertNotIn("overflow: hidden", bar_css[1])
+
+    def test_docs_match_enforced_rules(self) -> None:
+        skill = Path(__file__).with_name("SKILL.md").read_text(encoding="utf-8")
+        readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+        for token in ("python3", "xdg-open", "6", "16", "title", "unknowns"):
+            self.assertIn(token, skill)
+        self.assertNotIn("With ten parts or fewer, use no groups.", skill)
+        self.assertNotIn("Every part and every step cites a file and line range", readme)
+
+    def test_ci_workflow_pins_shas_and_runs_browser_on_all_fixtures(self) -> None:
+        wf = (Path(__file__).parent / ".github/workflows/test.yml").read_text(encoding="utf-8")
+        uses = re.findall(r"uses:\s*(\S+)", wf)
+        self.assertTrue(uses)
+        for u in uses:
+            self.assertRegex(u, r"@[0-9a-f]{40}$", f"action not pinned to 40-char SHA: {u}")
+        self.assertIn("EXPLAIN_CODEBASE_REQUIRE_CHROME", wf)
+        for fn in ("dense-1.json", "dense-2.json", "dense-3.json", "dense-4.json"):
+            self.assertIn(fn, wf)
+
+
+class ReserveAndFit(unittest.TestCase):
+    """Primary-font width reservation, client-side text fitting, and wide-font browser checks."""
+
+    def test_reserved_widths_emitted_and_used_by_page_script(self) -> None:
+        tmp, root, m = _make_repo(with_git=False)
+        try:
+            errs, ctx = render.check(m, root, False)
+            self.assertEqual(errs, [])
+            page, _ = render.build(m, root, ctx)
+        finally:
+            tmp.cleanup()
+
+        mt = re.search(r'<script type="application/json" id="data">(.*?)</script>', page, re.S)
+        self.assertIsNotNone(mt)
+        ov = json.loads(mt[1])["views"][""]
+        for key in ("clerk>api", "api>db", "api>carrier"):
+            entry = ov["arrows"][key]
+            self.assertGreater(entry["r"][0], 0)
+            self.assertEqual(len(entry["f"]), len(GOOD["flows"]))
+            self.assertGreater(entry["f"][0][0], 0)
+        for pid in ("clerk", "api", "db", "carrier"):
+            self.assertGreater(ov["parts"][pid], 0)
+
+        tpl = Path(__file__).with_name("page.html").read_text(encoding="utf-8")
+        for token in ("getComputedTextLength", "fontSize", "fit(", "fitParts("):
+            self.assertIn(token, tpl)
+
+    def test_browser_check_runs_both_default_and_wide_font(self) -> None:
+        sample = "<!doctype html><style>body{font:15px sans-serif}</style><body>ok</body></html>"
+        wide = render.browser_probe_html(sample, wide_font=True)
+        self.assertIn("Verdana", wide)
+        self.assertIn("DejaVu Sans", wide)
+        self.assertNotIn("Verdana", render.browser_probe_html(sample, wide_font=False))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            fake_chrome = root / "fake-chrome"
+            fake_chrome.write_text("", encoding="utf-8")
+            html_file = root / "page.html"
+            html_file.write_text(sample, encoding="utf-8")
+
+            seen_html: list[str] = []
+            clean_dom = _probe_dom({"checked": True, "breaches": []})
+            breach_dom = _probe_dom({"checked": True, "breaches": [{"picture": "", "flow": 0, "kind": "part", "a": "a>b", "a_text": "1 step", "b": "b"}]})
+
+            def run_both_clean(cmd, **kw):
+                seen_html.append(Path(cmd[-1].removeprefix("file://")).read_text(encoding="utf-8"))
+                return subprocess.CompletedProcess(cmd, 0, clean_dom, "")
+
+            with mock.patch.dict(os.environ, {}, clear=False), \
+                 mock.patch.object(render, "CHROME", str(fake_chrome)), \
+                 mock.patch.object(subprocess, "run", side_effect=run_both_clean):
+                os.environ.pop("EXPLAIN_CODEBASE_CHROME", None)
+                res = render.browser_check(html_file)
+            self.assertEqual(res, [])
+            self.assertEqual(len(seen_html), 2)
+            self.assertNotIn("Verdana", seen_html[0])
+            self.assertIn("Verdana", seen_html[1])
+            self.assertIn("DejaVu Sans", seen_html[1])
+
+            calls = iter([subprocess.CompletedProcess([], 0, clean_dom, ""),
+                          subprocess.CompletedProcess([], 0, breach_dom, "")])
+            with mock.patch.dict(os.environ, {}, clear=False), \
+                 mock.patch.object(render, "CHROME", str(fake_chrome)), \
+                 mock.patch.object(subprocess, "run", side_effect=lambda *a, **kw: next(calls)):
+                os.environ.pop("EXPLAIN_CODEBASE_CHROME", None)
+                res2 = render.browser_check(html_file)
+            self.assertEqual(len(res2), 1)
+            self.assertEqual(res2[0].get("font"), "wide")
+
+
+
+class BrowserTolerance(unittest.TestCase):
+    """The browser check must not fail a label that layout placed exactly at its margin.
+
+    Chrome samples curves and hints glyphs differently from render.py; a label placed at exactly
+    ARROW_MARGIN from its arrow once measured 0.01 px closer in Chrome and the real map was refused.
+    """
+
+    def test_browser_margins_sit_one_pixel_inside_layout_margins(self) -> None:
+        probe = render.BROWSER_PROBE
+        self.assertIn("TOLERANCE = 1", probe)
+        self.assertIn("MARGIN = 3 - TOLERANCE", probe)
+        self.assertIn(f"ARROW_MARGIN = {render.ARROW_MARGIN:g} - TOLERANCE", probe)
+        self.assertEqual(render.MARGIN, 3.0)
+
+if __name__ == "__main__":
+    unittest.main()

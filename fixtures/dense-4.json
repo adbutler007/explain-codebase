@@ -1,0 +1,522 @@
+{
+ "title": "Example dense-4",
+ "summary": "Bravo alpha builds cache entry canyon bravo scores harbor parcel loads ledger request score orbit posts anchor batch plan asks index each harbor writes saves tablet anchor posts status harbor meadow tablet bravo bravo beacon",
+ "groups": [
+  {
+   "id": "g1",
+   "label": "Parcel updates",
+   "does": "Folder queue window plan vessel writes ledger item starts index anchor cache entry delta sends"
+  },
+  {
+   "id": "g2",
+   "label": "Reads result result",
+   "does": "Summary builds bravo returns summary list beacon rows returns index window delta"
+  },
+  {
+   "id": "g3",
+   "label": "Alpha new item",
+   "does": "Quarry saves beacon result tablet rows file result list scores plan vessel item calls"
+  },
+  {
+   "id": "g4",
+   "label": "Echo list",
+   "does": "Cache calls request window marks tablet reply writes echo quarry"
+  },
+  {
+   "id": "g5",
+   "label": "Batch the meadow",
+   "does": "Lists plan file echo the alpha reads vessel posts beacon stores delta reads summary sends window"
+  }
+ ],
+ "parts": [
+  {
+   "id": "p1",
+   "label": "Lists plan",
+   "kind": "actor",
+   "does": "Posts file score list delta entry scores item asks beacon vessel"
+  },
+  {
+   "id": "p2",
+   "label": "New cache file",
+   "kind": "code",
+   "does": "Ledger fetches asks signal the score score builds request the queue tablet folder saves request",
+   "src": [
+    "src/mod2.py"
+   ]
+  },
+  {
+   "id": "p3",
+   "label": "Window parcel",
+   "kind": "code",
+   "group": "g1",
+   "does": "Echo rows marks cache batch list index delta alpha queue parcel bravo calls builds file beacon canyon lists",
+   "src": [
+    "src/mod3.py"
+   ]
+  },
+  {
+   "id": "p4",
+   "label": "The report",
+   "kind": "code",
+   "group": "g1",
+   "does": "Starts reply lists cache signal updates quarry builds scores plan opens vessel updates sends summary echo calls status request meadow",
+   "src": [
+    "src/mod4.py"
+   ]
+  },
+  {
+   "id": "p5",
+   "label": "Saves anchor",
+   "kind": "code",
+   "group": "g2",
+   "does": "Orbit ledger a index anchor loads new summary queue reads index beacon plan ledger ledger request scores starts new anchor alpha",
+   "src": [
+    "src/mod5.py"
+   ]
+  },
+  {
+   "id": "p6",
+   "label": "Reads",
+   "kind": "code",
+   "group": "g2",
+   "does": "Saves reply writes vessel orbit the sends new summary plan checks plan rows reads harbor updates marks opens posts status item fetches lists parcel",
+   "src": [
+    "src/mod6.py"
+   ]
+  },
+  {
+   "id": "p7",
+   "label": "Beacon each",
+   "kind": "code",
+   "group": "g3",
+   "does": "Builds rows the report reads list new asks harbor rows request returns builds request summary list signal list marks returns new",
+   "src": [
+    "src/mod7.py"
+   ]
+  },
+  {
+   "id": "p8",
+   "label": "Canyon",
+   "kind": "code",
+   "group": "g3",
+   "does": "Builds loads rows harbor harbor returns lists records reads parcel meadow plan list index vessel anchor status bravo bravo file",
+   "src": [
+    "src/mod8.py"
+   ]
+  },
+  {
+   "id": "p9",
+   "label": "Canyon index signal",
+   "kind": "code",
+   "group": "g5",
+   "does": "Loads parcel item beacon batch window parcel report reads stores marks folder starts reads file harbor cache report",
+   "src": [
+    "src/mod9.py"
+   ]
+  },
+  {
+   "id": "p10",
+   "label": "Fetches checks fetches",
+   "kind": "code",
+   "group": "g5",
+   "does": "Checks updates harbor a each queue asks window stores plan score harbor signal writes each canyon orbit opens",
+   "src": [
+    "src/mod10.py"
+   ]
+  },
+  {
+   "id": "p11",
+   "label": "Item fetches the",
+   "kind": "code",
+   "group": "g4",
+   "does": "Builds list result meadow echo list echo list rows lists cache stores request canyon each result index status new the parcel request tablet fetches calls calls",
+   "src": [
+    "src/mod11.py"
+   ]
+  },
+  {
+   "id": "p12",
+   "label": "Summary",
+   "kind": "code",
+   "group": "g4",
+   "does": "Scores harbor starts score alpha bravo quarry alpha checks reads posts scores asks stores folder parcel vessel"
+  },
+  {
+   "id": "p13",
+   "label": "Index writes lists",
+   "kind": "store",
+   "does": "reply vessel batch checks queue folder status updates plan canyon opens request folder updates meadow report",
+   "src": [
+    "src/mod13.py"
+   ]
+  },
+  {
+   "id": "p14",
+   "label": "Meadow delta",
+   "kind": "store",
+   "does": "sends item result alpha builds canyon beacon marks anchor new summary"
+  },
+  {
+   "id": "p15",
+   "label": "list bravo starts",
+   "kind": "code",
+   "does": "Signal alpha echo opens canyon report anchor cache parcel anchor batch file echo meadow new"
+  },
+  {
+   "id": "p16",
+   "label": "Saves checks",
+   "kind": "store",
+   "group": "g5",
+   "does": "Alpha quarry checks checks delta a tablet request result saves index file folder reply stores quarry list delta"
+  }
+ ],
+ "flows": [
+  {
+   "question": "What happens when loads vessel stores bravo report report queue builds alpha?",
+   "steps": [
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "saves rows each",
+     "src": "src/mod1.py:242-262"
+    },
+    {
+     "from": "p2",
+     "to": "p3",
+     "verb": "status sends file",
+     "src": "src/mod2.py:107-112"
+    },
+    {
+     "from": "p3",
+     "to": "p14",
+     "verb": "asks lists rows item tablet",
+     "src": "src/mod3.py:381-397"
+    },
+    {
+     "from": "p3",
+     "to": "p13",
+     "verb": "summary delta echo entry",
+     "src": "src/mod3.py:216-233"
+    },
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "builds meadow",
+     "src": "src/mod1.py:396-415"
+    },
+    {
+     "from": "p2",
+     "to": "p4",
+     "verb": "parcel updates",
+     "src": "src/mod2.py:394-396"
+    },
+    {
+     "from": "p4",
+     "to": "p13",
+     "verb": "item anchor tablet updates",
+     "src": "src/mod4.py:84-89",
+     "note": "Request queue writes report starts calls quarry cache opens reads status asks checks window returns checks opens"
+    },
+    {
+     "from": "p4",
+     "to": "p11",
+     "verb": "sends item each index starts",
+     "src": "src/mod4.py:204-209"
+    },
+    {
+     "from": "p11",
+     "to": "p12",
+     "verb": "plan reply request",
+     "src": "src/mod11.py:275-291",
+     "note": "Signal status quarry orbit the rows parcel saves reads checks saves echo a each each asks a beacon scores status score the calls"
+    },
+    {
+     "from": "p4",
+     "to": "p13",
+     "verb": "alpha fetches entry score",
+     "src": "src/mod4.py:87-96",
+     "note": "Sends each calls folder builds loads batch bravo"
+    }
+   ]
+  },
+  {
+   "question": "What happens when list ledger plan queue tablet tablet calls saves loads plan entry?",
+   "steps": [
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "reply tablet tablet",
+     "src": "src/mod1.py:106-121"
+    },
+    {
+     "from": "p2",
+     "to": "p5",
+     "verb": "delta records item",
+     "src": "src/mod2.py:10-13"
+    },
+    {
+     "from": "p5",
+     "to": "p13",
+     "verb": "loads result harbor signal",
+     "src": "src/mod5.py:257-275",
+     "note": "Builds rows status harbor lists canyon signal item loads anchor anchor rows ledger queue file status batch"
+    },
+    {
+     "from": "p5",
+     "to": "p15",
+     "verb": "stores asks returns reads",
+     "src": "src/mod5.py:252-265",
+     "note": "Vessel status plan updates saves beacon posts alpha quarry score starts meadow alpha delta batch"
+    },
+    {
+     "from": "p5",
+     "to": "p13",
+     "verb": "batch folder tablet index",
+     "src": "src/mod5.py:61-62"
+    },
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "saves updates a",
+     "src": "src/mod1.py:299-314"
+    },
+    {
+     "from": "p2",
+     "to": "p6",
+     "verb": "queue summary",
+     "src": "src/mod2.py:305-318"
+    },
+    {
+     "from": "p6",
+     "to": "p13",
+     "verb": "delta tablet records item",
+     "src": "src/mod6.py:148-152",
+     "note": "Quarry file starts list checks echo harbor entry plan item marks alpha result echo posts returns plan report builds queue a"
+    },
+    {
+     "from": "p6",
+     "to": "p11",
+     "verb": "records parcel beacon signal",
+     "src": "src/mod6.py:222-224"
+    },
+    {
+     "from": "p11",
+     "to": "p12",
+     "verb": "ledger ledger plan",
+     "src": "src/mod11.py:173-182"
+    },
+    {
+     "from": "p6",
+     "to": "p13",
+     "verb": "cache fetches new",
+     "src": "src/mod6.py:116-120"
+    }
+   ]
+  },
+  {
+   "question": "What happens when batch fetches opens plan updates beacon tablet?",
+   "steps": [
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "the parcel stores",
+     "src": "src/mod1.py:87-95"
+    },
+    {
+     "from": "p2",
+     "to": "p7",
+     "verb": "cache scores result",
+     "src": "src/mod2.py:171-172"
+    },
+    {
+     "from": "p7",
+     "to": "p13",
+     "verb": "cache new builds meadow",
+     "src": "src/mod7.py:337-356"
+    },
+    {
+     "from": "p7",
+     "to": "p11",
+     "verb": "writes asks saves loads",
+     "src": "src/mod7.py:319-337",
+     "note": "Alpha result posts delta request item status ledger canyon echo alpha the anchor alpha window item"
+    },
+    {
+     "from": "p11",
+     "to": "p12",
+     "verb": "index item canyon",
+     "src": "src/mod11.py:13-24"
+    },
+    {
+     "from": "p7",
+     "to": "p13",
+     "verb": "tablet window batch canyon",
+     "src": "src/mod7.py:38-50",
+     "note": "Rows stores report entry score orbit each canyon item the alpha bravo rows marks request batch alpha a posts starts starts"
+    },
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "lists loads asks",
+     "src": "src/mod1.py:219-219"
+    },
+    {
+     "from": "p2",
+     "to": "p8",
+     "verb": "reads asks status",
+     "src": "src/mod2.py:367-373"
+    },
+    {
+     "from": "p8",
+     "to": "p13",
+     "verb": "saves reads status request",
+     "src": "src/mod8.py:243-243"
+    },
+    {
+     "from": "p8",
+     "to": "p13",
+     "verb": "orbit reply scores",
+     "src": "src/mod8.py:230-240"
+    }
+   ]
+  },
+  {
+   "question": "What happens when each rows window the folder marks result?",
+   "steps": [
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "reads quarry entry",
+     "src": "src/mod1.py:352-360"
+    },
+    {
+     "from": "p2",
+     "to": "p10",
+     "verb": "window bravo signal",
+     "src": "src/mod2.py:40-44"
+    },
+    {
+     "from": "p10",
+     "to": "p13",
+     "verb": "saves tablet records ledger",
+     "src": "src/mod10.py:253-256"
+    },
+    {
+     "from": "p10",
+     "to": "p16",
+     "verb": "harbor saves anchor",
+     "src": "src/mod10.py:192-196"
+    },
+    {
+     "from": "p1",
+     "to": "p9",
+     "verb": "anchor harbor canyon",
+     "src": "src/mod1.py:69-87"
+    },
+    {
+     "from": "p9",
+     "to": "p16",
+     "verb": "harbor stores plan",
+     "src": "src/mod9.py:209-211"
+    },
+    {
+     "from": "p9",
+     "to": "p13",
+     "verb": "saves builds meadow saves",
+     "src": "src/mod9.py:163-168"
+    },
+    {
+     "from": "p9",
+     "to": "p12",
+     "verb": "folder checks status entry",
+     "src": "src/mod9.py:377-397",
+     "note": "Canyon plan calls checks report request orbit marks scores signal builds rows starts marks"
+    },
+    {
+     "from": "p9",
+     "to": "p16",
+     "verb": "writes each updates",
+     "src": "src/mod9.py:396-406"
+    },
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "signal harbor records",
+     "src": "src/mod1.py:23-38"
+    },
+    {
+     "from": "p2",
+     "to": "p8",
+     "verb": "report stores lists",
+     "src": "src/mod2.py:290-303"
+    },
+    {
+     "from": "p8",
+     "to": "p13",
+     "verb": "harbor queue meadow",
+     "src": "src/mod8.py:170-173",
+     "note": "Each writes builds window orbit rows loads ledger marks asks bravo posts opens updates bravo status"
+    }
+   ]
+  },
+  {
+   "question": "What happens when request bravo report batch beacon queue?",
+   "steps": [
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "echo report stores quarry",
+     "src": "src/mod1.py:111-117"
+    },
+    {
+     "from": "p2",
+     "to": "p10",
+     "verb": "marks each saves each",
+     "src": "src/mod2.py:259-264"
+    },
+    {
+     "from": "p10",
+     "to": "p16",
+     "verb": "index scores meadow",
+     "src": "src/mod10.py:351-354"
+    },
+    {
+     "from": "p10",
+     "to": "p13",
+     "verb": "saves ledger file ledger",
+     "src": "src/mod10.py:1-10"
+    },
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "alpha signal new",
+     "src": "src/mod1.py:319-320"
+    },
+    {
+     "from": "p2",
+     "to": "p10",
+     "verb": "the quarry loads",
+     "src": "src/mod2.py:245-253"
+    },
+    {
+     "from": "p10",
+     "to": "p13",
+     "verb": "parcel stores item saves",
+     "src": "src/mod10.py:26-44"
+    },
+    {
+     "from": "p10",
+     "to": "p16",
+     "verb": "ledger cache orbit",
+     "src": "src/mod10.py:38-39"
+    }
+   ]
+  }
+ ],
+ "unknowns": [
+  "Asks reply delta orbit each saves posts starts signal records marks updates beacon updates scores parcel records summary sends new folder vessel reply request batch ledger",
+  "Queue cache orbit delta status sends the delta folder stores posts harbor list request asks loads parcel loads reply",
+  "Summary vessel list loads the parcel bravo lists calls a delta quarry reply returns window each echo posts window",
+  "List posts anchor a ledger canyon each posts reads alpha item vessel tablet harbor"
+ ]
+}

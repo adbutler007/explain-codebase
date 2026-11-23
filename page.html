@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>{{title}}: how it works</title>
+<style>
+  /* A printed diagram with the route marked in highlighter: ink on paper, and one colour, used only for the route. */
+  :root { --bg: #fbfbf9; --plate: #f0f1ee; --surface: #fff; --ink: #1b1f24; --mute: #69717b; --rule: #d5d8d3; --line: #868d96; --mark: #ffd23f; }
+  /* Dark follows the system unless the reader picked a theme with the switch above the picture. */
+  :root { color-scheme: light; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme=light]) { color-scheme: dark; --bg: #131619; --plate: #191d21; --surface: #242a31; --ink: #e9e7e2; --mute: #98a0aa; --rule: #30363d; --line: #737b86; --mark: #b5890f; }
+  }
+  :root[data-theme=dark] { color-scheme: dark; --bg: #131619; --plate: #191d21; --surface: #242a31; --ink: #e9e7e2; --mute: #98a0aa; --rule: #30363d; --line: #737b86; --mark: #b5890f; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 "Avenir Next", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+  .page { max-width: 1720px; margin: 0 auto; padding: 18px 28px 80px; }
+  header { padding: 0 8px; }
+  h1 { margin: 0 0 2px; font-size: 21px; font-weight: 600; letter-spacing: -.01em; }
+  h2 { margin: 36px 0 6px; padding: 0 8px; font-size: 13px; font-weight: 600; color: var(--mute); }
+  header p { margin: 0; color: var(--mute); font-size: 13px; }
+  a { color: inherit; text-underline-offset: 2px; }
+  code, .cite { font: 12px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  code { font-size: .86em; background: var(--plate); padding: 1px 4px; border-radius: 3px; }
+  .cite { color: var(--mute); overflow-wrap: anywhere; }
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; }
+
+  main { display: grid; grid-template-columns: 350px minmax(0, 1fr); gap: 14px 36px; align-items: start; }
+  figure { margin: 0; grid-column: 2; grid-row: 1 / span 2; position: sticky; top: 14px; }
+  @media (max-width: 960px) { main { grid-template-columns: 1fr; } figure { position: static; grid-column: 1; grid-row: 2; } }
+
+  /* the map */
+  .bar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px 14px; min-height: 22px; margin-bottom: 6px; font-size: 13px; color: var(--mute); }
+  .bar b { color: var(--ink); font-weight: 600; }
+  .key { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 12px; }
+  .key > span { white-space: nowrap; }
+  .theme { flex: none; height: 20px; padding: 0 8px; font: inherit; font-size: 12px; color: var(--mute); background: none; border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+  .theme:hover { color: var(--ink); border-color: var(--line); }
+  .key svg { width: 22px; height: 16px; margin-right: 5px; vertical-align: -4px; fill: none; stroke: var(--line); stroke-width: 1.2; }
+  .plate { display: flex; justify-content: center; padding: 12px; background: var(--plate); border-radius: 8px; }
+  .plate svg { display: block; width: 100%; height: auto; max-height: calc(100vh - 122px); }
+  .plate svg[hidden] { display: none; }
+  figcaption { margin-top: 8px; height: 2.9em; overflow: hidden; font-size: 13px; line-height: 1.45; color: var(--mute); }
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  svg text { font-family: inherit; text-anchor: middle; fill: var(--ink); }
+  .part text { font-size: 15px; font-weight: 500; }
+  .part text.sub { font-size: 12px; font-weight: 400; fill: var(--mute); }
+  .part .shape { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; }
+  .part.outside .shape, .arrow.unseen .line { stroke-dasharray: 4 3; }
+  .part.outside .shape, .part.beside .shape { fill: var(--plate); }
+  .part.beside text { fill: var(--mute); }
+  .part.opens { cursor: pointer; }
+  .part.opens:hover .shape { stroke: var(--ink); }
+  .arrow { color: var(--line); }
+  .arrow .line { fill: none; stroke: currentColor; stroke-width: 1.2; }
+  .arrow .head { fill: currentColor; }
+  .arrow .hit { fill: none; stroke: transparent; stroke-width: 16; }
+  .arrow .mark { fill: none; stroke: var(--mark); stroke-width: 9; stroke-linecap: round; opacity: 0; }
+  text.arrow { font-size: 12px; fill: var(--ink); paint-order: stroke; stroke: var(--plate); stroke-width: 5px; stroke-linejoin: round; }
+  text.arrow tspan tspan { font-weight: 700; }
+  svg text.arrow:not(.on):not(.now) { opacity: 0; }
+  svg [data-part], svg [data-arrow] { transition: opacity .15s; }
+  svg.has-flow [data-part]:not(.on), svg.has-flow [data-arrow]:not(.on) { opacity: .38; }
+  .arrow.on, .arrow.now { color: var(--ink); }
+  .arrow.on .line { stroke-width: 1.6; }
+  .arrow.on .mark { opacity: .7; }
+  .part.on .shape { stroke: var(--ink); stroke-width: 1.5; }
+  .part.on text.sub { fill: var(--ink); font-weight: 600; }
+  svg .now { opacity: 1 !important; }
+  .arrow.now .line { stroke-width: 2.2; }
+  .arrow.now .mark { opacity: 1; stroke-width: 13; }
+  .part.now .shape { stroke: var(--ink); stroke-width: 1.8; fill: color-mix(in srgb, var(--mark) 45%, var(--surface)); }
+
+  /* the text */
+  .summary { margin: 0 0 18px; padding: 0 8px; }
+  details { border-top: 1px solid var(--rule); }
+  details:last-of-type { border-bottom: 1px solid var(--rule); }
+  summary { display: flex; gap: 10px; padding: 12px 8px; font-weight: 600; cursor: pointer; list-style: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "+"; flex: none; width: 1em; color: var(--mute); font-weight: 400; }
+  details[open] > summary::before { content: "\2212"; }
+  ol, dl, ul { margin: 0; padding: 0; list-style: none; }
+  ol { counter-reset: step; padding-bottom: 10px; }
+  ol li { counter-increment: step; display: grid; grid-template-columns: 28px 1fr; padding: 6px 8px; border-radius: 5px; }
+  ol li::before { content: counter(step); font-weight: 700; font-variant-numeric: tabular-nums; }
+  ol li b { font-weight: 600; }
+  ol li div > span { display: block; }
+  ol li p, dd { margin: 2px 0 0; color: var(--mute); font-size: 13.5px; }
+  ol li small { display: none; margin-left: 6px; font-size: 12.5px; text-decoration: underline; text-underline-offset: 2px; }
+  /* a step the open picture does not draw: one quiet line that leads to the picture that does */
+  ol li.aside { color: var(--mute); padding-block: 3px; font-size: 13.5px; }
+  ol li.aside::before, ol li.aside b { font-weight: 400; }
+  ol li.aside p, ol li.aside .cite { display: none; }
+  ol li.aside[data-go] { cursor: pointer; }
+  ol li.aside div > span { display: inline; }
+  ol li.aside b::after { content: "\A"; white-space: pre; }
+  ol li.aside[data-go] small { display: inline; }
+  dl > div, .group > div { padding: 6px 8px; border-radius: 5px; }
+  dt { font-weight: 600; }
+  dt small { margin-left: 6px; font-weight: 400; font-size: 12.5px; color: var(--mute); }
+  .group { margin: 6px 0; }
+  .group > div + div { margin-left: 8px; padding-left: 14px; border-left: 1px solid var(--rule); border-radius: 0 5px 5px 0; }
+  .group > [data-go] { cursor: pointer; }
+  ul li { padding: 4px 8px; font-size: 13.5px; }
+  li.now, dl div.now { background: color-mix(in srgb, var(--mark) 38%, var(--bg)); color: var(--ink); }
+</style>
+<div class="page">
+  <main>
+    <header>
+      <h1>{{title}}</h1>
+      <p>{{stamp}}</p>
+    </header>
+    <div>
+      <p class="summary">{{summary}}</p>
+      {{flows}}
+      <section><h2>Parts</h2><dl>{{parts}}</dl></section>
+      {{unknowns}}
+    </div>
+    <figure>
+      <div class="bar"><span class="crumbs"></span><span class="key">{{key}}</span><button class="theme" type="button"></button></div>
+      <div class="plate">{{maps}}</div>
+      <figcaption>Arrows point from the part that acts to the part it acts on. Point at a box or an arrow to read what it does.</figcaption>
+    </figure>
+  </main>
+</div>
+<script type="application/json" id="data">{{data}}</script>
+<script>
+  // views: each picture's name and where it draws each part (the part's own box, its group's box, or nowhere).
+  const { views, names } = JSON.parse(document.getElementById('data').textContent);
+  const caption = document.querySelector('figcaption'), legend = caption.textContent, crumbs = document.querySelector('.crumbs');
+  const all = (selector, root = document) => [...root.querySelectorAll(selector)];
+  const own = (obj, k, fb = '') => obj && Object.hasOwn(obj, k) ? obj[k] : fb;
+  const flows = all('details[name=flow]'), ends = arrow => arrow.split('>');
+  let view = '', svg;
+  const box = id => svg.querySelector('g[data-part="' + id + '"]');
+  const labelOf = arrow => svg.querySelector('text[data-arrow="' + arrow + '"]');
+  const address = (v = view) => '#' + (v && v + '/') + (flows.findIndex(d => d.open) + 1);
+
+  // Shrink any line wider than its reserved width; never enlarge.
+  function fit(text, maxW, baseSize) {
+    if (!maxW || maxW <= 0) return;
+    const spans = all(':scope > tspan', text);
+    for (const el of spans.length ? spans : [text]) {
+      el.style.fontSize = '';
+      let len = el.getComputedTextLength(), fs = baseSize;
+      for (const factor of [100, 99]) {
+        if (!(len > maxW)) break;
+        fs = Math.min(fs, Math.floor(fs * (maxW / len) * factor) / 100);
+        el.style.fontSize = fs + 'px';
+        len = el.getComputedTextLength();
+      }
+    }
+  }
+
+  // Fit every part box's name once per picture while that picture is visible.
+  function fitParts() {
+    if (svg.dataset.partsFitted) return;
+    const pMeta = views[view].parts;
+    all('g.part', svg).forEach(g => {
+      const label = g.querySelector('text:not(.sub)'), maxW = own(pMeta, g.dataset.part, 0);
+      if (label && maxW) fit(label, maxW, 15);
+    });
+    svg.dataset.partsFitted = '1';
+  }
+
+  // Opening a question draws its route on the open picture: its arrows and boxes stay lit and take step numbers.
+  // A step this picture does not draw becomes one quiet line in the list, leading to the picture that draws it.
+  function paint() {
+    const cur = views[view], at = cur.at, home = views[''].at, flow = flows.find(d => d.open);
+    const flowIdx = flows.indexOf(flow), aMeta = cur.arrows, pMeta = cur.parts;
+    all('.on', svg).forEach(e => e.classList.remove('on'));
+    all('text[data-arrow]', svg).forEach(t => {
+      const m = own(aMeta, t.dataset.arrow, null);
+      write(t, t.dataset.label.split('\n').map(verb => ['', verb]), m && m.r);
+    });
+    all('text.sub', svg).forEach(t => {
+      t.textContent = t.dataset.sub;
+      fit(t, own(pMeta, t.closest('g.part').dataset.part, 0), 12);
+    });
+    svg.classList.toggle('has-flow', !!flow);
+    if (!flow) return;
+    const drawn = new Map(), within = new Map();
+    all('li', flow).forEach((li, i) => {
+      const { from, to, verb } = li.dataset;
+      const a = own(at, from), b = own(at, to);
+      const arrow = a && b && a !== b && svg.querySelector('g[data-arrow="' + a + '>' + b + '"]') ? a + '>' + b : '';
+      const inside = !arrow && a && a === b ? a : '';
+      const hf = own(home, from), ht = own(home, to);
+      const go = hf && hf === ht && Object.hasOwn(views, hf) ? hf : '';
+      li.classList.toggle('aside', !arrow);
+      for (const [key, value] of [['arrow', arrow], ['part', inside]]) value ? li.dataset[key] = value : delete li.dataset[key];
+      arrow || go === view ? delete li.dataset.go : li.dataset.go = go;
+      li.querySelector('small').textContent = arrow ? '' : 'in ' + (go ? names[go] : 'the overview');
+      if (arrow) drawn.set(arrow, [...(drawn.get(arrow) || []), [i + 1, verb]]);
+      if (inside) within.set(inside, [...(within.get(inside) || []), i + 1]);
+    });
+    for (const [arrow, steps] of drawn) {
+      all('[data-arrow="' + arrow + '"]', svg).forEach(e => e.classList.add('on'));
+      ends(arrow).forEach(id => box(id).classList.add('on'));
+      const m = own(aMeta, arrow, null);
+      write(labelOf(arrow), steps, m && m.f[flowIdx]);
+    }
+    for (const [id, steps] of within) {       // a closed group says which steps happen inside it
+      const run = steps.at(-1) - steps[0] === steps.length - 1, sub = box(id).querySelector('.sub');
+      box(id).classList.add('on');
+      sub.textContent = steps.length === 1 ? 'step ' + steps[0] + ' inside'
+        : run ? 'steps ' + steps[0] + '–' + steps.at(-1) + ' inside' : steps.length + ' steps inside';
+      fit(sub, own(pMeta, id, 0), 12);
+    }
+  }
+
+  // An arrow's label, one line per verb or step, stacked around its anchor point, fitted to its reserved width.
+  function write(text, lines, spec) {
+    const tspan = () => document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+    if (spec) {
+      text.setAttribute('x', spec[1]);
+      text.setAttribute('y', spec[2]);
+      text.style.textAnchor = spec[3] < 0 ? 'end' : spec[3] > 0 ? 'start' : 'middle';
+      text.dataset.maxW = spec[0];
+    }
+    text.textContent = '';
+    lines.forEach(([number, verb], i) => {
+      const line = tspan(), bold = tspan();
+      line.setAttribute('x', text.getAttribute('x'));
+      line.setAttribute('dy', i ? 15 : (1 - lines.length) * 7.5);
+      bold.textContent = number && number + ' ';
+      line.append(bold, verb);
+      text.append(line);
+    });
+    if (spec) fit(text, spec[0], 12);
+  }
+
+  // Pointing at anything lights its counterpart: text on the left, picture on the right.
+  function point(el) {
+    all('.now').forEach(e => e.classList.remove('now'));
+    caption.textContent = legend;
+    if (!el) return;
+    const { arrow, part } = el.dataset, said = document.createElement('b');
+    if (arrow) {
+      [...all('[data-arrow="' + arrow + '"]', svg), ...all('li[data-arrow="' + arrow + '"]'), ...ends(arrow).map(box)].forEach(e => e.classList.add('now'));
+      const t = labelOf(arrow);
+      if (t && t.dataset.maxW) fit(t, +t.dataset.maxW, 12);
+      said.textContent = ends(arrow).map(id => names[id]).join(' → ');
+      caption.replaceChildren(said, ' ' + t.dataset.label.replaceAll('\n', ', '));
+    } else {
+      const here = box(part) ? part : own(views[view].at, part);      // a part inside a closed group lights the group
+      const lit = here ? [box(here), ...all('g[data-arrow]', svg).filter(e => ends(e.dataset.arrow).includes(here))] : [];
+      [...lit, ...all('dl [data-part="' + part + '"], li[data-part="' + part + '"]')].forEach(e => e.classList.add('now'));
+      said.textContent = own(names, part, part);
+      const dd = document.querySelector('dl [data-part="' + part + '"] dd');
+      caption.replaceChildren(said, ' ', ...(dd ? dd.cloneNode(true).childNodes : []));
+    }
+  }
+
+  // The address holds the open picture and the open question: page.html#2, page.html#orders/2.
+  function read() {
+    let raw = '';
+    try { raw = decodeURIComponent(location.hash.slice(1)); } catch { raw = ''; }
+    const [first, second] = raw.split('/');
+    const number = second ?? (/^\d+$/.test(first) ? first : null);
+    if (number !== null) flows.forEach((d, i) => { d.open = i === number - 1; });
+    view = first && Object.hasOwn(views, first) && !(second === undefined && number !== null) ? first : '';
+    all('.plate svg').forEach(s => s.toggleAttribute('hidden', s.dataset.view !== view));
+    svg = document.querySelector('.plate svg:not([hidden])');
+    const name = document.createElement('b'), up = document.createElement('a');
+    name.textContent = view ? views[view].label : 'Overview';
+    up.textContent = 'Overview';
+    up.href = address('');
+    crumbs.replaceChildren(...(view ? [up, ' / ', name] : [name]));
+    fitParts();
+    point(null);
+    paint();
+  }
+  const go = v => { location.hash = address(v); };
+
+  flows.forEach(d => d.addEventListener('toggle', () => { history.replaceState(null, '', address()); read(); }));
+  addEventListener('hashchange', read);
+  document.addEventListener('pointerover', e => point(e.target.closest('[data-arrow], [data-part]')));
+  document.addEventListener('focusin', e => point(e.target.closest('[data-arrow], [data-part]')));
+  document.addEventListener('click', e => { const t = !e.target.closest('a') && e.target.closest('[data-go]'); if (t) go(t.dataset.go); });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target.matches('[data-go]')) go(e.target.dataset.go);
+    if (e.key === 'Escape' && view) go('');
+  });
+  read();
+
+  // Light or dark: the system's choice until the reader picks one, which the browser then remembers.
+  const root = document.documentElement, toggle = document.querySelector('.theme'), saved = 'explain-codebase-theme';
+  const system = matchMedia('(prefers-color-scheme: dark)');
+  const dark = () => root.dataset.theme ? root.dataset.theme === 'dark' : system.matches;
+  const name = () => { toggle.textContent = dark() ? 'Light' : 'Dark'; toggle.title = 'Switch to ' + toggle.textContent.toLowerCase() + ' mode'; };
+  try { root.dataset.theme = localStorage.getItem(saved) || ''; } catch { /* storage blocked: follow the system */ }
+  if (!root.dataset.theme) delete root.dataset.theme;
+  toggle.addEventListener('click', () => {
+    root.dataset.theme = dark() ? 'light' : 'dark';
+    try { localStorage.setItem(saved, root.dataset.theme); } catch { /* the choice lasts until the page closes */ }
+    name();
+  });
+  system.addEventListener('change', name);
+  name();
+</script>
+</html>

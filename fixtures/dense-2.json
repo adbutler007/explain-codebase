@@ -1,0 +1,510 @@
+{
+ "title": "Example 12",
+ "summary": "Harbor meadow alpha delta meadow signal quarry tablet tablet harbor harbor folder meadow ledger window bravo quarry parcel folder ledger anchor ledger orbit bravo orbit signal echo anchor echo quarry orbit beacon canyon.",
+ "groups": [
+  {
+   "id": "g1",
+   "label": "Tablet window",
+   "does": "Vessel beacon alpha window ledger alpha window ledger parcel ledger delta beacon meadow beacon."
+  },
+  {
+   "id": "g2",
+   "label": "Window parcel",
+   "does": "Parcel quarry anchor quarry quarry alpha harbor vessel harbor canyon quarry delta."
+  },
+  {
+   "id": "g3",
+   "label": "Ledger meadow",
+   "does": "Echo alpha quarry quarry echo beacon bravo quarry ledger tablet vessel quarry."
+  },
+  {
+   "id": "g4",
+   "label": "Quarry",
+   "does": "Folder beacon alpha parcel canyon folder vessel canyon ledger."
+  },
+  {
+   "id": "g5",
+   "label": "Orbit parcel",
+   "does": "Vessel echo orbit harbor echo parcel orbit bravo echo window echo folder folder quarry canyon echo."
+  }
+ ],
+ "parts": [
+  {
+   "id": "p1",
+   "label": "Beacon",
+   "kind": "actor",
+   "does": "Beacon canyon vessel parcel orbit ledger quarry canyon vessel."
+  },
+  {
+   "id": "p2",
+   "label": "Parcel ledger",
+   "does": "Harbor anchor tablet alpha ledger beacon delta harbor orbit ledger canyon delta vessel.",
+   "src": [
+    "src/mod2.py"
+   ]
+  },
+  {
+   "id": "p3",
+   "label": "Delta folder",
+   "group": "g1",
+   "does": "Beacon ledger vessel bravo folder vessel delta vessel beacon orbit orbit folder quarry harbor harbor.",
+   "src": [
+    "src/mod3.py"
+   ]
+  },
+  {
+   "id": "p4",
+   "label": "Parcel",
+   "group": "g1",
+   "does": "Folder meadow quarry delta folder signal parcel meadow ledger signal tablet bravo delta meadow parcel delta meadow alpha canyon window.",
+   "src": [
+    "src/mod4.py"
+   ]
+  },
+  {
+   "id": "p5",
+   "label": "Beacon echo",
+   "group": "g2",
+   "does": "Meadow alpha harbor harbor folder vessel quarry echo delta ledger bravo canyon meadow canyon quarry ledger orbit parcel echo vessel.",
+   "src": [
+    "src/mod5.py"
+   ]
+  },
+  {
+   "id": "p6",
+   "label": "Echo",
+   "group": "g2",
+   "does": "Window echo signal bravo signal signal beacon canyon harbor canyon folder alpha echo quarry harbor delta anchor vessel ledger bravo delta anchor orbit.",
+   "src": [
+    "src/mod6.py"
+   ]
+  },
+  {
+   "id": "p7",
+   "label": "Quarry bravo",
+   "group": "g3",
+   "does": "Bravo parcel anchor delta window folder tablet meadow anchor parcel quarry echo ledger vessel canyon folder echo canyon ledger.",
+   "src": [
+    "src/mod7.py"
+   ]
+  },
+  {
+   "id": "p8",
+   "label": "Anchor",
+   "group": "g3",
+   "does": "Orbit meadow anchor harbor signal vessel folder alpha delta ledger window anchor beacon harbor orbit parcel echo harbor.",
+   "src": [
+    "src/mod8.py"
+   ]
+  },
+  {
+   "id": "p9",
+   "label": "Signal canyon echo",
+   "group": "g5",
+   "does": "Vessel signal tablet delta delta quarry orbit anchor folder folder window alpha vessel tablet vessel meadow ledger.",
+   "src": [
+    "src/mod9.py"
+   ]
+  },
+  {
+   "id": "p10",
+   "label": "Anchor anchor window",
+   "group": "g5",
+   "does": "Bravo folder orbit echo alpha parcel window folder window parcel bravo alpha canyon folder orbit orbit canyon.",
+   "src": [
+    "src/mod10.py"
+   ]
+  },
+  {
+   "id": "p11",
+   "label": "Window bravo",
+   "group": "g4",
+   "does": "Vessel orbit parcel meadow vessel bravo ledger echo tablet vessel window alpha echo bravo window echo parcel meadow delta tablet canyon bravo signal.",
+   "src": [
+    "src/mod11.py"
+   ]
+  },
+  {
+   "id": "p12",
+   "label": "Canyon",
+   "group": "g4",
+   "does": "Ledger echo window beacon echo quarry canyon tablet delta vessel beacon delta alpha signal orbit parcel."
+  },
+  {
+   "id": "p13",
+   "label": "Tablet echo",
+   "kind": "store",
+   "does": "Bravo ledger signal tablet anchor signal folder alpha canyon echo beacon quarry echo ledger beacon parcel alpha.",
+   "src": [
+    "src/mod13.py"
+   ]
+  },
+  {
+   "id": "p14",
+   "label": "Bravo parcel",
+   "kind": "store",
+   "does": "Vessel beacon window bravo meadow beacon bravo canyon beacon ledger."
+  },
+  {
+   "id": "p15",
+   "label": "Anchor folder",
+   "does": "Window ledger beacon alpha alpha meadow alpha delta alpha delta vessel echo quarry parcel parcel."
+  },
+  {
+   "id": "p16",
+   "label": "Anchor meadow",
+   "kind": "store",
+   "group": "g5",
+   "does": "Folder bravo window window window ledger window meadow window orbit quarry alpha orbit bravo canyon delta."
+  }
+ ],
+ "flows": [
+  {
+   "question": "What happens when the beacon beacon ledger quarry runs?",
+   "steps": [
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "sends the batch",
+     "src": "src/mod1.py:57-63"
+    },
+    {
+     "from": "p2",
+     "to": "p3",
+     "verb": "records the report",
+     "src": "src/mod2.py:293-309"
+    },
+    {
+     "from": "p3",
+     "to": "p14",
+     "verb": "calls the index",
+     "src": "src/mod3.py:105-112"
+    },
+    {
+     "from": "p3",
+     "to": "p13",
+     "verb": "checks each item",
+     "src": "src/mod3.py:333-336"
+    },
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "writes the report",
+     "src": "src/mod1.py:274-284"
+    },
+    {
+     "from": "p2",
+     "to": "p4",
+     "verb": "checks its status",
+     "src": "src/mod2.py:19-19"
+    },
+    {
+     "from": "p4",
+     "to": "p13",
+     "verb": "loads the summary",
+     "src": "src/mod4.py:283-295",
+     "note": "Vessel harbor quarry beacon window bravo vessel signal harbor beacon meadow folder signal beacon bravo harbor."
+    },
+    {
+     "from": "p4",
+     "to": "p11",
+     "verb": "builds the result",
+     "src": "src/mod4.py:120-122"
+    },
+    {
+     "from": "p11",
+     "to": "p12",
+     "verb": "scores a request",
+     "src": "src/mod11.py:145-148",
+     "note": "Canyon anchor parcel folder window window canyon window signal bravo beacon window meadow window anchor window signal harbor."
+    },
+    {
+     "from": "p4",
+     "to": "p13",
+     "verb": "scores the list",
+     "src": "src/mod4.py:35-47",
+     "note": "Meadow bravo ledger delta canyon harbor canyon."
+    }
+   ]
+  },
+  {
+   "question": "What happens when the delta vessel vessel signal runs?",
+   "steps": [
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "stores its status",
+     "src": "src/mod1.py:351-370"
+    },
+    {
+     "from": "p2",
+     "to": "p5",
+     "verb": "saves the record",
+     "src": "src/mod2.py:189-193"
+    },
+    {
+     "from": "p5",
+     "to": "p13",
+     "verb": "reads the cache",
+     "src": "src/mod5.py:156-166",
+     "note": "Meadow bravo alpha folder delta beacon tablet signal beacon meadow alpha orbit alpha orbit folder parcel."
+    },
+    {
+     "from": "p5",
+     "to": "p15",
+     "verb": "updates the file",
+     "src": "src/mod5.py:204-215",
+     "note": "Tablet signal beacon harbor tablet bravo orbit harbor window echo orbit orbit delta orbit folder."
+    },
+    {
+     "from": "p5",
+     "to": "p13",
+     "verb": "loads the batch",
+     "src": "src/mod5.py:82-99"
+    },
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "sends the batch",
+     "src": "src/mod1.py:22-27"
+    },
+    {
+     "from": "p2",
+     "to": "p6",
+     "verb": "records the report",
+     "src": "src/mod2.py:59-68"
+    },
+    {
+     "from": "p6",
+     "to": "p13",
+     "verb": "marks every entry",
+     "src": "src/mod6.py:87-96",
+     "note": "Meadow delta tablet ledger beacon quarry alpha echo alpha echo orbit canyon ledger canyon vessel harbor alpha harbor."
+    },
+    {
+     "from": "p6",
+     "to": "p11",
+     "verb": "lists the file",
+     "src": "src/mod6.py:152-168"
+    },
+    {
+     "from": "p11",
+     "to": "p12",
+     "verb": "calls the cache",
+     "src": "src/mod11.py:283-288"
+    },
+    {
+     "from": "p6",
+     "to": "p13",
+     "verb": "fetches the batch",
+     "src": "src/mod6.py:302-316"
+    }
+   ]
+  },
+  {
+   "question": "What happens when the parcel delta beacon runs?",
+   "steps": [
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "calls the queue",
+     "src": "src/mod1.py:91-109"
+    },
+    {
+     "from": "p2",
+     "to": "p7",
+     "verb": "starts its status",
+     "src": "src/mod2.py:109-109"
+    },
+    {
+     "from": "p7",
+     "to": "p13",
+     "verb": "fetches the queue",
+     "src": "src/mod7.py:59-71"
+    },
+    {
+     "from": "p7",
+     "to": "p11",
+     "verb": "calls the batch",
+     "src": "src/mod7.py:51-65",
+     "note": "Canyon parcel ledger delta harbor anchor orbit folder tablet quarry quarry orbit meadow window."
+    },
+    {
+     "from": "p11",
+     "to": "p12",
+     "verb": "opens the queue",
+     "src": "src/mod11.py:13-26"
+    },
+    {
+     "from": "p7",
+     "to": "p13",
+     "verb": "updates the cache",
+     "src": "src/mod7.py:109-118",
+     "note": "Signal window echo parcel harbor delta bravo echo tablet canyon meadow window beacon anchor meadow vessel anchor orbit anchor."
+    },
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "builds the queue",
+     "src": "src/mod1.py:344-344"
+    },
+    {
+     "from": "p2",
+     "to": "p8",
+     "verb": "returns the index",
+     "src": "src/mod2.py:168-174"
+    },
+    {
+     "from": "p8",
+     "to": "p13",
+     "verb": "starts the result",
+     "src": "src/mod8.py:188-202"
+    },
+    {
+     "from": "p8",
+     "to": "p13",
+     "verb": "opens the report",
+     "src": "src/mod8.py:80-81"
+    }
+   ]
+  },
+  {
+   "question": "What happens when the signal bravo runs?",
+   "steps": [
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "loads every entry",
+     "src": "src/mod1.py:218-221"
+    },
+    {
+     "from": "p2",
+     "to": "p10",
+     "verb": "writes every entry",
+     "src": "src/mod2.py:305-315"
+    },
+    {
+     "from": "p10",
+     "to": "p13",
+     "verb": "opens each item",
+     "src": "src/mod10.py:159-171"
+    },
+    {
+     "from": "p10",
+     "to": "p16",
+     "verb": "returns the summary",
+     "src": "src/mod10.py:197-208"
+    },
+    {
+     "from": "p1",
+     "to": "p9",
+     "verb": "records the summary",
+     "src": "src/mod1.py:46-59"
+    },
+    {
+     "from": "p9",
+     "to": "p16",
+     "verb": "records new rows",
+     "src": "src/mod9.py:176-185"
+    },
+    {
+     "from": "p9",
+     "to": "p13",
+     "verb": "returns the batch",
+     "src": "src/mod9.py:356-369"
+    },
+    {
+     "from": "p9",
+     "to": "p12",
+     "verb": "lists the summary",
+     "src": "src/mod9.py:46-47",
+     "note": "Tablet vessel delta harbor harbor orbit bravo tablet quarry signal ledger signal bravo."
+    },
+    {
+     "from": "p9",
+     "to": "p16",
+     "verb": "builds its status",
+     "src": "src/mod9.py:386-405"
+    },
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "checks the summary",
+     "src": "src/mod1.py:395-413"
+    },
+    {
+     "from": "p2",
+     "to": "p8",
+     "verb": "records the list",
+     "src": "src/mod2.py:70-73"
+    },
+    {
+     "from": "p8",
+     "to": "p13",
+     "verb": "returns every entry",
+     "src": "src/mod8.py:174-182",
+     "note": "Vessel ledger beacon vessel bravo tablet canyon vessel orbit ledger parcel ledger folder window meadow."
+    }
+   ]
+  },
+  {
+   "question": "What happens when the ledger anchor runs?",
+   "steps": [
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "lists the batch",
+     "src": "src/mod1.py:245-260"
+    },
+    {
+     "from": "p2",
+     "to": "p10",
+     "verb": "loads the plan",
+     "src": "src/mod2.py:193-201"
+    },
+    {
+     "from": "p10",
+     "to": "p16",
+     "verb": "updates every entry",
+     "src": "src/mod10.py:220-232"
+    },
+    {
+     "from": "p10",
+     "to": "p13",
+     "verb": "posts new rows",
+     "src": "src/mod10.py:345-361"
+    },
+    {
+     "from": "p1",
+     "to": "p2",
+     "verb": "checks a request",
+     "src": "src/mod1.py:86-103"
+    },
+    {
+     "from": "p2",
+     "to": "p10",
+     "verb": "lists the result",
+     "src": "src/mod2.py:22-32"
+    },
+    {
+     "from": "p10",
+     "to": "p13",
+     "verb": "builds a score",
+     "src": "src/mod10.py:43-55"
+    },
+    {
+     "from": "p10",
+     "to": "p16",
+     "verb": "loads each item",
+     "src": "src/mod10.py:60-60"
+    }
+   ]
+  }
+ ],
+ "unknowns": [
+  "Folder quarry window delta meadow anchor window vessel beacon parcel vessel tablet alpha vessel orbit signal canyon signal window bravo folder parcel quarry canyon vessel harbor.",
+  "Harbor folder delta beacon echo ledger quarry tablet beacon echo vessel anchor ledger canyon folder bravo harbor.",
+  "Ledger tablet signal delta parcel canyon delta vessel beacon echo alpha alpha signal signal delta beacon alpha.",
+  "Signal bravo vessel vessel echo folder vessel alpha meadow vessel quarry alpha."
+ ]
+}
