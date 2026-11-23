@@ -46,6 +46,14 @@ The page needs no server: open the HTML file. It follows the system's light or d
 
 The renderer runs read-only git commands in the repository, and running git inside a `.git` folder from someone you do not trust is unsafe in general (as git's own documentation warns), so render such a repository from a fresh clone.
 
+
+## Known limits
+
+The renderer refuses obvious attempts to write or read outside the repository, but it is not a sandbox. These cases are known and not handled:
+
+- A symlink inside the repository that points at another repository is followed if you give the renderer a path that runs through it. Run it on `docs/how-it-works.json` from the repository root.
+- Files cited inside a git submodule are not checked for changes since the map's commit, and their GitHub links may not resolve.
+- On macOS, a cited path that differs from the tracked one only in Unicode normalisation, or a directory renamed only in letter case, can escape the check for changed files.
 ## Tests
 
 ```bash
