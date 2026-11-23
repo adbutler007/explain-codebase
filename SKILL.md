@@ -66,7 +66,8 @@ through them; the map keeps that order where it can.
 
 A picture stays readable up to ten boxes, both in the overview and in any opened group (including the boxes beside it). With ten parts or fewer, prefer no groups unless the renderer refuses a crowded picture and grouping parts clears the labels. With more, put parts that work
 together into **groups** until the overview (groups plus ungrouped parts) and every opened group has ten boxes or fewer, and preferably five
-to eight. A group holds 2 to 10 parts that the reader would name as one thing: the stages of one job, the endpoints
+to eight. A group holds 2 to 10 parts that the reader would name as one thing (an opened group also counts the boxes beside it against the
+10-box limit, so a group with outside neighbours fits fewer): the stages of one job, the endpoints
 of one server, a page and its helpers. Leave on their own the parts every flow passes through (the entry point, the
 one database) and the actors. An outside part that only one group's work touches (the service a job calls) goes in
 that group. Do not group parts only because they share a folder.
@@ -142,15 +143,15 @@ python3 ${CLAUDE_SKILL_DIR}/render.py docs/how-it-works.json
 
 The renderer checks the map against the code before it draws anything: every cited line exists, each step's evidence
 lies in the code of the part that acts, each step touches a part its flow has already reached, every part is on a
-route, and the size limits hold. It also refuses a map whose arrow labels cannot be placed clear of boxes, arrows and each other, or whose picture shrinks below scale 0.6; shorten the verbs, put fewer steps on that arrow, or group parts to fix it. It prints every problem and writes nothing until there are none (including browser-check failures). A problem means the map is wrong
+route, and the size limits hold. It also refuses a map whose arrow labels cannot be placed clear of boxes, arrows and each other, or whose picture shrinks below scale 0.6; shorten the verbs, put fewer steps on that arrow, or group parts to fix it. It checks in stages — map and citation rules first, then layout, then the open question's labels in a real browser across every picture — printing every problem in the failing stage and writing nothing until all stages pass. If the browser check cannot start (for example inside a sandbox), rerun the renderer outside the sandbox. If that is impossible, set `EXPLAIN_CODEBASE_CHROME=none` and say in your reply that the page was not checked in a browser. A problem means the map is wrong
 about the code or too crowded to read, so change the map: read again, merge, split, shorten. Do not stretch a citation
 or move a file between parts to quiet a message. On success it writes `docs/how-it-works.html` beside the JSON and
 prints the paths of its screenshots: one per flow on the overview, then one per group opened.
 
 ## 5. Read the page as the reader would
 
-Look at every screenshot. If the renderer took none, check each arrow from the JSON against its cited lines instead,
-and say in your reply that the page was not viewed. Check that each group's box reads as one thing and that its opened picture shows how its
+Look at every screenshot. If the renderer took none (or was run with `EXPLAIN_CODEBASE_CHROME=none`), check each arrow from the JSON against its cited lines instead,
+and say in your reply that the page was not viewed (and not checked in a browser, if skipped). Check that each group's box reads as one thing and that its opened picture shows how its
 parts work together. Then answer each question from its screenshots alone: for every arrow in the answer, say who acts, on
 what, and what crosses, and compare that with the cited lines. An arrow that points at the wrong part is corrected in
 the map; a note cannot correct it. Render again after any change.

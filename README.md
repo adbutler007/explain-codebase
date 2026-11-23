@@ -8,15 +8,15 @@ Large codebases are drawn at two levels. The overview shows at most ten boxes; p
 
 ## What the renderer checks
 
-`render.py` reads the map the agent writes (`docs/how-it-works.json`) and refuses to draw it, listing every problem, when:
+`render.py` reads the map the agent writes (`docs/how-it-works.json`) and refuses to draw it, listing the problems found, when:
 
-- a cited file or line does not exist, or a file changed since the commit the map records;
+- a cited file or line does not exist, a cited path uses a symlink, or a file changed since the commit the map records;
 - a step's evidence is not in the code of the part that acts;
 - a step does not touch a part its flow has already reached, or a part is on no route;
 - a picture (the overview or any opened group) would have more than ten boxes, shrink below readable scale, or exceed a text, flow or step limit;
 - an arrow's label cannot be placed clear of the other labels, the boxes and the arrows of its question, including its own arrow.
 
-When Chrome is available it checks every label in a real browser on a temporary copy and takes screenshots before placing `docs/how-it-works.html` beside the JSON; if the check fails, nothing is written.
+When Chrome is available it checks the open question's labels in every picture (the overview and each opened group) in a real browser on a temporary copy and takes screenshots before placing `docs/how-it-works.html` beside the JSON; if the check fails, nothing is written.
 
 ## Install
 
@@ -24,7 +24,7 @@ When Chrome is available it checks every label in a real browser on a temporary 
 git clone <this repository> ~/.claude/skills/explain-codebase
 ```
 
-Requirements: Python 3.10 or later, with no third-party packages. [uv](https://docs.astral.sh/uv/) runs the renderer from its script header, and plain `python3` works too. Google Chrome or Chromium is optional. Without it, the screenshots and the browser check are skipped with a note. Set `EXPLAIN_CODEBASE_CHROME` to point at a browser in an unusual place.
+Requirements: Python 3.10 or later, with no third-party packages. [uv](https://docs.astral.sh/uv/) runs the renderer from its script header, and plain `python3` works too. Google Chrome or Chromium is optional. Without it, the screenshots and the browser check are skipped with a note. Set `EXPLAIN_CODEBASE_CHROME` to point at a browser in an unusual place, or `EXPLAIN_CODEBASE_CHROME=none` to skip the browser check and screenshots (for example inside a sandbox where an installed browser cannot start); the renderer then prints "not checked in a browser".
 
 ## Use
 
@@ -47,7 +47,7 @@ The page needs no server: open the HTML file. It follows the system's light or d
 uv run test_render.py      # or: python3 test_render.py
 ```
 
-`fixtures/` holds two real maps with their words scrambled. The scrambling keeps every letter's width, so they lay out as the originals did.
+`fixtures/` holds four synthetic maps with neutral words (`dense-1.json` through `dense-4.json`) used by the layout and browser label-clearance tests.
 
 ## Credits
 

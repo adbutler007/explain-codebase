@@ -902,7 +902,7 @@ class ReserveAndFit(unittest.TestCase):
         ov = json.loads(mt[1])["views"][""]
         for key in ("clerk>api", "api>db", "api>carrier"):
             entry = ov["arrows"][key]
-            self.assertGreater(entry["r"][0], 0)
+            self.assertNotIn("r", entry)
             self.assertEqual(len(entry["f"]), len(GOOD["flows"]))
             self.assertGreater(entry["f"][0][0], 0)
         for pid in ("clerk", "api", "db", "carrier"):
@@ -970,6 +970,359 @@ class BrowserTolerance(unittest.TestCase):
         self.assertIn("MARGIN = 3 - TOLERANCE", probe)
         self.assertIn(f"ARROW_MARGIN = {render.ARROW_MARGIN:g} - TOLERANCE", probe)
         self.assertEqual(render.MARGIN, 3.0)
+
+
+class ClosingInvariants(unittest.TestCase):
+    """Regression tests for invariants 1-7 covering the full class of each audit finding."""
+
+    def test_inv1_root_docs_only_no_ancestor_symlinks_and_no_core_worktree_escape(self) -> None:
+        tmp, root, m = _make_repo(with_git=True)
+        outside = tempfile.TemporaryDirectory()
+        try:
+            out_dir = Path(outside.name).resolve()
+            no_chrome = root / "no-chrome"
+            map_path = root / "docs/how-it-works.json"
+            map_path.write_text(json.dumps(m), encoding="utf-8")
+
+            # 1a. Planted core.worktree must not move the repository root or blind citation/staleness checks.
+            ext_secret = root.parent / "outside-secret.py"
+            ext_secret.write_text("secret = 1\n", encoding="utf-8")
+            try:
+                subprocess.run(["git", "-C", str(root), "config", "core.worktree", "../.."], check=True)
+                found_root, in_git = render.find_root(map_path)
+                self.assertTrue(in_git)
+                self.assertEqual(found_root.resolve(), root)
+                # Dirty detection still works even with core.worktree poisoned.
+                (root / "src/api.py").write_text("".join(f"edited {i}\n" for i in range(1, 13)), encoding="utf-8")
+                errs, ctx = render.check(copy.deepcopy(m), found_root, True)
+                self.assertEqual(errs, [])
+                self.assertIn("src/api.py", ctx["dirty"])
+                (root / "src/api.py").write_text("".join(f"line {i}\n" for i in range(1, 13)), encoding="utf-8")
+                subprocess.run(["git", "-C", str(root), "config", "--unset", "core.worktree"], check=True)
+            finally:
+                ext_secret.unlink(missing_ok=True)
+
+            # 1b. Ancestor directory symlinks (repo/sub -> outside, nested, and inside docs/) are refused.
+            (out_dir / "docs").mkdir()
+            (out_dir / "src").mkdir()
+            (out_dir / "src/api.py").write_text("".join(f"line {i}\n" for i in range(1, 13)), encoding="utf-8")
+            (out_dir / "src/schema.sql").write_text("create table orders (id);\n", encoding="utf-8")
+            m_nogit = copy.deepcopy(GOOD)
+            (out_dir / "docs/how-it-works.json").write_text(json.dumps(m_nogit), encoding="utf-8")
+            (out_dir / "nested/docs").mkdir(parents=True)
+            (out_dir / "nested/src").mkdir()
+            (out_dir / "nested/src/api.py").write_text("".join(f"line {i}\n" for i in range(1, 13)), encoding="utf-8")
+            (out_dir / "nested/src/schema.sql").write_text("create table orders (id);\n", encoding="utf-8")
+            (out_dir / "nested/docs/how-it-works.json").write_text(json.dumps(m_nogit), encoding="utf-8")
+
+            (root / "sub").symlink_to(out_dir)
+            (root / "docs/link").symlink_to(out_dir)
+            (root / "docs/real").mkdir()
+            (root / "docs/real/in.json").write_text(json.dumps(m), encoding="utf-8")
+            (root / "docs/alias").symlink_to(root / "docs/real")
+
+            for bad_map, victim_html in (
+                (root / "sub/docs/how-it-works.json", out_dir / "docs/how-it-works.html"),
+                (root / "sub/nested/docs/how-it-works.json", out_dir / "nested/docs/how-it-works.html"),
+                (root / "docs/link/docs/how-it-works.json", out_dir / "docs/how-it-works.html"),
+                (root / "docs/alias/in.json", root / "docs/real/in.html"),
+            ):
+                rc, out = _run_main(bad_map, chrome=no_chrome)
+                self.assertEqual(rc, 1, f"expected refusal for {bad_map}, got rc={rc}: {out}")
+                self.assertFalse(victim_html.exists(), f"unexpected write at {victim_html}")
+
+            # 1c. Maps outside docs/ (in git or non-git) are refused.
+            (root / "root-map.json").write_text(json.dumps(m), encoding="utf-8")
+            (root / "other").mkdir()
+            (root / "other/map.json").write_text(json.dumps(m), encoding="utf-8")
+            (out_dir / "plain.json").write_text(json.dumps(m_nogit), encoding="utf-8")
+            for non_docs in (root / "root-map.json", root / "other/map.json", out_dir / "plain.json"):
+                rc, out = _run_main(non_docs, chrome=no_chrome)
+                self.assertEqual(rc, 1, f"expected refusal outside docs/ for {non_docs}, got rc={rc}: {out}")
+                self.assertFalse(non_docs.with_suffix(".html").exists())
+        finally:
+            tmp.cleanup()
+            outside.cleanup()
+
+    def test_inv2_git_no_repo_execution_no_status_quote_hex_ref_and_no_symlink_cites(self) -> None:
+        tmp, root, m = _make_repo(with_git=True)
+        marker_dir = tempfile.TemporaryDirectory()
+        try:
+            pwn = Path(marker_dir.name).resolve() / "pwned"
+            script = Path(marker_dir.name).resolve() / "evil.sh"
+            script.write_text(f"#!/bin/sh\necho \"$@\" >> {pwn}\nexit 0\n", encoding="utf-8")
+            script.chmod(0o755)
+
+            # Non-ASCII cited file + .gitattributes filter/diff drivers.
+            (root / "src/café.py").write_text("line 1\nline 2\n", encoding="utf-8")
+            (root / ".gitattributes").write_text("* filter=evil diff=evil\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "cafe"], check=True)
+
+            # Forge a commit with a gpgsig header to trigger log.showSignature / gpg.program if unguarded.
+            raw_c = subprocess.run(["git", "-C", str(root), "cat-file", "commit", "HEAD"], capture_output=True, text=True, check=True).stdout
+            hdr, body = raw_c.split("\n\n", 1)
+            signed = hdr + "\ngpgsig -----BEGIN PGP SIGNATURE-----\n fake\n -----END PGP SIGNATURE-----\n\n" + body
+            signed_sha = subprocess.run(["git", "-C", str(root), "hash-object", "-t", "commit", "-w", "--stdin"],
+                                        input=signed, capture_output=True, text=True, check=True).stdout.strip()
+            subprocess.run(["git", "-C", str(root), "update-ref", "HEAD", signed_sha], check=True)
+            m["commit"] = signed_sha
+            m["parts"][1]["src"] = ["src/api.py:1-12", "src/café.py:1-2"]
+
+            # Plant hostile .git/config keys across every execution vector.
+            for k, v in (
+                ("filter.evil.clean", f"{script} clean"),
+                ("filter.evil.smudge", f"{script} smudge"),
+                ("filter.evil.process", f"{script} process"),
+                ("diff.evil.textconv", f"{script} textconv"),
+                ("diff.external", f"{script} extdiff"),
+                ("log.showSignature", "true"),
+                ("gpg.program", str(script)),
+                ("core.fsmonitor", f"{script} fsmonitor"),
+                ("core.hooksPath", str(Path(marker_dir.name).resolve())),
+            ):
+                subprocess.run(["git", "-C", str(root), "config", k, v], check=True)
+
+            # Rewrite src/api.py with identical bytes to make index stat stale (as after unpacking an archive).
+            (root / "src/api.py").write_text("".join(f"line {i}\n" for i in range(1, 13)), encoding="utf-8")
+
+            # Spy on git subprocess invocations: no `git status`, must pass core.quotePath=false.
+            seen_cmds: list[list[str]] = []
+            real_run = subprocess.run
+
+            def spy(cmd, *a, **kw):
+                seen_cmds.append(list(cmd))
+                return real_run(cmd, *a, **kw)
+
+            with mock.patch.object(subprocess, "run", side_effect=spy):
+                errs, ctx = render.check(copy.deepcopy(m), root, True)
+            self.assertEqual(errs, [])
+            self.assertEqual(ctx["dirty"], set())
+            self.assertFalse(pwn.exists(), f"planted git config executed: {pwn.read_text() if pwn.exists() else ''}")
+            self.assertTrue(seen_cmds)
+            for cmd in seen_cmds:
+                self.assertNotIn("status", cmd, f"git status must not be used: {cmd}")
+                self.assertIn("core.quotePath=false", cmd)
+
+            # Unstaged and staged modifications to non-ASCII cited file are detected accurately.
+            (root / "src/café.py").write_text("edited 1\nline 2\n", encoding="utf-8")
+            errs_u, ctx_u = render.check(copy.deepcopy(m), root, True)
+            self.assertEqual(errs_u, [])
+            self.assertIn("src/café.py", ctx_u["dirty"])
+            self.assertFalse(pwn.exists())
+
+            # Stage and commit without letting the test's own git commands invoke the planted filter/fsmonitor/hooks.
+            safe_git = ["git", "-C", str(root), "-c", "filter.evil.clean=", "-c", "filter.evil.process=",
+                        "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+            subprocess.run([*safe_git, "add", "src/café.py"], check=True)
+            errs_s, ctx_s = render.check(copy.deepcopy(m), root, True)
+            self.assertEqual(errs_s, [])
+            self.assertIn("src/café.py", ctx_s["dirty"])
+
+            # Committed change to non-ASCII file is reported with attribution.
+            subprocess.run([*safe_git, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "edit cafe"], check=True)
+            errs_c, _ = render.check(copy.deepcopy(m), root, True)
+            self.assertTrue(any("src/café.py changed since" in e and 'part "api"' in e for e in errs_c), errs_c)
+            m["commit"] = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+
+            # Hex-named ref (refs/heads/deadbee) must NOT pass as commit SHA.
+            fake_hex = "deadbee" if not m["commit"].lower().startswith("deadbee") else "cafebab"
+            subprocess.run(["git", "-C", str(root), "branch", fake_hex, "HEAD"], check=True)
+            m_ref = copy.deepcopy(m)
+            m_ref["commit"] = fake_hex
+            self.assertTrue(render.check(m_ref, root, True)[0], "hex-named branch ref must not satisfy commit")
+
+            # Intra-repo symlinks (both file symlink and intermediate dir symlink) must be refused in citations.
+            (root / "src/alias.py").symlink_to("api.py")
+            (root / "src/linkdir").symlink_to(".")
+            for sym_cite in ("src/alias.py:1-3", "src/linkdir/api.py:1-3"):
+                m_sym = copy.deepcopy(m)
+                m_sym["parts"][1]["src"] = ["src/api.py:1-12", sym_cite]
+                self.assertTrue(render.check(m_sym, root, True)[0], f"intra-repo symlink {sym_cite} must be refused")
+        finally:
+            tmp.cleanup()
+            marker_dir.cleanup()
+
+    def test_inv3_no_resting_labels_only_checked_open_question_labels(self) -> None:
+        tmp, root, m = _make_repo(with_git=False)
+        try:
+            errs, ctx = render.check(m, root, False)
+            self.assertEqual(errs, [])
+            _, _, arrows = render.view(m["parts"], ctx["groups"], m["flows"], None)
+            for arr in arrows.values():
+                self.assertNotIn("resting_w", arr)
+                self.assertNotIn("resting_size", arr)
+                self.assertNotIn("label", arr)
+            page, _ = render.build(m, root, ctx)
+        finally:
+            tmp.cleanup()
+
+        # No resting label metadata ("r") in embedded JSON and no pre-populated resting <text> labels.
+        mt = re.search(r'<script type="application/json" id="data">(.*?)</script>', page, re.S)
+        self.assertIsNotNone(mt)
+        ov = json.loads(mt[1])["views"][""]
+        for entry in ov["arrows"].values():
+            self.assertNotIn("r", entry)
+        for text_el in re.findall(r'<text class="arrow[^"]*"[^>]*>.*?</text>', page):
+            self.assertNotIn("data-label=", text_el)
+            self.assertTrue(text_el.endswith("></text>"), f"arrow <text> should start empty: {text_el}")
+
+        # page.html must never reveal unchecked labels on hover or give them pointer events.
+        tpl = Path(__file__).with_name("page.html").read_text(encoding="utf-8")
+        self.assertIn("pointer-events: none", tpl)
+        self.assertNotIn("svg text.arrow:not(.on):not(.now)", tpl)
+        self.assertNotIn("m.r", tpl)
+        self.assertNotIn("dataset.label", tpl)
+
+    def test_inv4_unbounded_text_refused_wide_chars_widened_and_9px_floor(self) -> None:
+        tmp, root, m = _make_repo(with_git=False)
+        try:
+            # Control chars (incl. newline, tab, NUL, U+2028), format chars (bidi RLO, wide Arabic Cf), PUA refused across all text fields.
+            bad_strings = ("a\nb", "a\rb", "a\tb", "a\x00b", "a\x1bb", "a\u2028b", "a\u202eb", "a\u0604b", "a\ue000b")
+            field_mutators = (
+                lambda x, s: x.__setitem__("summary", s),
+                lambda x, s: x.__setitem__("title", s),
+                lambda x, s: x["parts"][1].__setitem__("label", s),
+                lambda x, s: x["parts"][1].__setitem__("does", s),
+                lambda x, s: x["flows"][0].__setitem__("question", s),
+                lambda x, s: x["flows"][0]["steps"][0].__setitem__("verb", s),
+                lambda x, s: x["flows"][0]["steps"][2].__setitem__("note", s),
+                lambda x, s: x.__setitem__("unknowns", [s]),
+            )
+            for idx, mutate in enumerate(field_mutators):
+                for bad_s in bad_strings:
+                    mc = copy.deepcopy(m)
+                    mutate(mc, bad_s)
+                    self.assertTrue(render.check(mc, root, False)[0], f"field {idx} should refuse {bad_s!r}")
+
+            # Group label and does also refuse control chars.
+            mg = copy.deepcopy(m)
+            mg["groups"] = [{"id": "grp", "label": "Bad\nGroup", "does": "Line1\nLine2"}]
+            mg["parts"][1]["group"] = mg["parts"][2]["group"] = "grp"
+            self.assertGreaterEqual(len(render.check(mg, root, False)[0]), 2)
+
+            # >2 combining marks on one character refused (both Mn and Me); <=2 combining marks allowed.
+            for bad_marks in ("a" + "\u0301" * 3, "a" + "\u0302" * 15, "a" + "\u20dd" * 3):
+                mc = copy.deepcopy(m)
+                mc["flows"][0]["steps"][0]["verb"] = bad_marks
+                self.assertTrue(render.check(mc, root, False)[0], f"should refuse stacked marks {bad_marks!r}")
+            m_ok_marks = copy.deepcopy(m)
+            m_ok_marks["flows"][0]["steps"][0]["verb"] = "e\u0302\u0323 ok"  # 2 combining marks (decomposed Vietnamese)
+            self.assertEqual(render.check(m_ok_marks, root, False)[0], [])
+
+            # Unbounded archaic script character (Cuneiform 4.64 em) is refused.
+            m_cun = copy.deepcopy(m)
+            m_cun["flows"][0]["steps"][0]["verb"] = "\U0001242b"
+            self.assertTrue(render.check(m_cun, root, False)[0])
+
+            # Wide bounded characters (U+2E3A-2E3B, U+FDFA-FDFD) are accepted with widened width estimates.
+            self.assertGreaterEqual(render.text_w("\u2e3a", 12), 2.0 * 12)
+            self.assertGreaterEqual(render.text_w("\u2e3b", 12), 3.0 * 12)
+            self.assertGreaterEqual(render.text_w("\ufdfa", 12), 6.0 * 12)
+            self.assertGreaterEqual(render.text_w("\ufdfd", 12), 6.5 * 12)
+            for wide_ch in ("\u2e3a", "\u2e3b", "\ufdfa", "\ufdfd"):
+                mw = copy.deepcopy(m)
+                mw["flows"][0]["steps"][0]["verb"] = wide_ch
+                self.assertEqual(render.check(mw, root, False)[0], [], f"wide char U+{ord(wide_ch):04X} should be accepted")
+        finally:
+            tmp.cleanup()
+
+        # page.html fit() clamps at 9 px; BROWSER_PROBE reports fitted size < 9 px as a breach.
+        tpl = Path(__file__).with_name("page.html").read_text(encoding="utf-8")
+        fit_fn = re.search(r"function fit\([^)]*\)\s*\{.*?\n  \}", tpl, re.S)
+        self.assertIsNotNone(fit_fn)
+        self.assertIn("Math.max(9,", fit_fn[0])
+        self.assertIn("tooSmall", tpl)
+        self.assertIn("tooSmall", render.BROWSER_PROBE)
+        msg = render.format_browser_breach({"picture": "", "flow": 0, "kind": "min_font", "a": "api>db", "a_text": "1 step", "b": "9px"})
+        self.assertIn("9 px", msg)
+
+    def test_inv5_malformed_inputs_never_crash_and_no_internal_skip_key(self) -> None:
+        tmp, root, m = _make_repo(with_git=False)
+        try:
+            no_chrome = root / "no-chrome"
+            # Lone surrogates in text or citations never produce a traceback in check() or main().
+            for mut in (
+                lambda x: x.__setitem__("summary", "bad \ud800 text"),
+                lambda x: x.__setitem__("unknowns", ["bad \ud800 unknown"]),
+                lambda x: x["parts"][1].__setitem__("src", ["src/api\ud800.py:1-2"]),
+                lambda x: x["parts"][1].__setitem__("src", ["src/api\x00.py:1-2"]),
+                lambda x: x["flows"][0]["steps"][1].__setitem__("src", "src/api.py:1-" + "9" * 5000),
+            ):
+                mc = copy.deepcopy(m)
+                mut(mc)
+                errs, _ = render.check(mc, root, False)
+                self.assertTrue(errs)
+                # Ensure every error message encodes cleanly as UTF-8 (no surrogate crash on print).
+                "\n".join(errs).encode("utf-8")
+
+            # CLI on lone surrogate JSON, NUL in path, and 200k-deep JSON exits 1 cleanly with no traceback.
+            surr_path = root / "docs/surr.json"
+            surr_path.write_text('{"summary": "bad \\ud800", "parts": [], "flows": []}', encoding="utf-8")
+            rc_s, out_s = _run_main(surr_path, chrome=no_chrome)
+            self.assertEqual(rc_s, 1)
+            self.assertIn("error:", out_s)
+
+            deep_path = root / "docs/deep.json"
+            deep_path.write_text("[" * 200000 + "]" * 200000, encoding="utf-8")
+            rc_d, out_d = _run_main(deep_path, chrome=no_chrome)
+            self.assertEqual(rc_d, 1)
+            self.assertIn("error:", out_d)
+
+            rc_n, out_n = _run_main(Path(str(root / "docs/bad\x00.json")), chrome=no_chrome)
+            self.assertEqual(rc_n, 1)
+            self.assertIn("error:", out_n)
+
+            # Internal _skip key in input JSON must never be honoured.
+            m_skip = copy.deepcopy(m)
+            m_skip["flows"][0]["steps"][2]["_skip"] = True
+            errs_sk, ctx_sk = render.check(m_skip, root, False)
+            self.assertEqual(errs_sk, [])
+            self.assertEqual(len(m_skip["flows"][0]["steps"]), 3)
+            _, counts = render.build(m_skip, root, ctx_sk)
+            self.assertEqual(counts["steps"], 3)
+        finally:
+            tmp.cleanup()
+
+    def test_inv6_chrome_none_skips_browser_check_and_docs_explain_it(self) -> None:
+        tmp, root, m = _make_repo(with_git=False)
+        try:
+            map_path = root / "docs/how-it-works.json"
+            map_path.write_text(json.dumps(m), encoding="utf-8")
+            broken_chrome = root / "broken-chrome"
+            broken_chrome.write_text("#!/bin/sh\nexit 133\n", encoding="utf-8")
+            broken_chrome.chmod(0o755)
+
+            # Without opt-out, a broken discovered browser fails closed.
+            rc_fail, _ = _run_main(map_path, chrome=broken_chrome)
+            self.assertEqual(rc_fail, 1)
+            self.assertFalse(map_path.with_suffix(".html").exists())
+
+            # With EXPLAIN_CODEBASE_CHROME=none, browser check and screenshots are skipped cleanly.
+            rc_ok, out_ok = _run_main(map_path, chrome=broken_chrome, env={"EXPLAIN_CODEBASE_CHROME": "none"})
+            self.assertEqual(rc_ok, 0, out_ok)
+            self.assertIn("not checked in a browser", out_ok)
+            self.assertTrue(map_path.with_suffix(".html").exists())
+        finally:
+            tmp.cleanup()
+
+        readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+        skill = Path(__file__).with_name("SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("EXPLAIN_CODEBASE_CHROME=none", readme)
+        self.assertIn("EXPLAIN_CODEBASE_CHROME=none", skill)
+        self.assertIn("outside the sandbox", skill)
+
+    def test_inv7_readme_and_skill_match_code_exactly(self) -> None:
+        readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+        skill = Path(__file__).with_name("SKILL.md").read_text(encoding="utf-8")
+        self.assertNotIn("two real maps", readme)
+        self.assertNotIn("scrambled", readme)
+        self.assertIn("four synthetic maps", readme)
+        self.assertIn("open question's labels", readme)
+        self.assertNotIn("checks every label", readme)
+        self.assertNotIn("It prints every problem and writes nothing", skill)
+        self.assertIn("beside", skill)
+
 
 if __name__ == "__main__":
     unittest.main()

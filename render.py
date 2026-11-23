@@ -6,11 +6,12 @@
 
     uv run render.py docs/how-it-works.json
 
-Writes docs/how-it-works.html and a screenshot of each flow and each group. When the map breaks a rule, every
-problem is listed, nothing is written, and the exit code is 1.
+Writes docs/how-it-works.html and a screenshot of each flow and each group. When the map breaks a rule, the
+problems are listed, nothing is written, and the exit code is 1.
 """
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import math
@@ -42,12 +43,15 @@ LIMITS = {
     "title": 80, "unknown": 400,
 }
 KINDS = ("code", "store", "actor")
-# Headless Chrome takes the screenshots and checks the labels in a real browser. EXPLAIN_CODEBASE_CHROME names it;
-# otherwise the usual install places are tried, and without it both steps are skipped with a note.
-CHROME = os.environ.get("EXPLAIN_CODEBASE_CHROME") or next(
-    (c for c in ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                 *filter(None, map(shutil.which, ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"))))
-     if Path(c).exists()), "chrome-not-found")
+# Headless Chrome takes the screenshots and checks the labels in a real browser. EXPLAIN_CODEBASE_CHROME names it
+# (or "none" to skip); otherwise the usual install places are tried, and without it both steps are skipped with a note.
+_ENV_CHROME = os.environ.get("EXPLAIN_CODEBASE_CHROME")
+CHROME = (
+    _ENV_CHROME if _ENV_CHROME and _ENV_CHROME.strip().lower() != "none" else
+    next((c for c in ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                      *filter(None, map(shutil.which, ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"))))
+          if Path(c).exists()), "chrome-not-found")
+)
 
 
 class BrowserError(Exception):
@@ -65,36 +69,101 @@ class Cite(NamedTuple):
         return f"{self.path}:{self.a}" + (f"-{self.b}" if self.b != self.a else "")
 
 
-def git(root: Path, *args: str) -> str | None:
+def git(root: Path, *args: str, raw: bool = False) -> str | None:
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     cmd = [
         "git", "--no-pager",
         "-c", "core.fsmonitor=false",
         "-c", "core.hooksPath=/dev/null",
+        "-c", "core.quotePath=false",
         "-c", "diff.external=",
         "-c", "gc.auto=0",
+        "-c", "log.showSignature=false",
+        "-c", "gpg.program=",
+        "-c", "gpg.ssh.program=",
+        "-c", "gpg.x509.program=",
         "-C", str(root),
-        *args,
     ]
     try:
+        git_dir = root / ".git"
+        if git_dir.is_dir() and not git_dir.is_symlink():
+            cmd += [f"--git-dir={git_dir}", f"--work-tree={root}"]
+        cmd.extend(args)
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=GIT_TIMEOUT, env=env)
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
-    return r.stdout.rstrip("\n") if r.returncode == 0 else None
+    if r.returncode != 0:
+        return None
+    return r.stdout if raw else r.stdout.rstrip("\n")
 
 
 def find_root(map_path: Path) -> tuple[Path, bool]:
-    top = git(map_path.parent, "rev-parse", "--show-toplevel")
-    if top:
-        return Path(top), True
+    git_dir = git(map_path.parent, "rev-parse", "--absolute-git-dir")
+    if git_dir:
+        return Path(git_dir).parent, True
     d = map_path.parent
     return (d.parent if d.name == "docs" else d), False
+
+
+def _blob_id(f: Path, alg: str = "sha1", symlink: bool = False) -> str | None:
+    """Compute git's blob id for f without filters; return None if unreadable or over MAX_FILE_BYTES."""
+    try:
+        if symlink:
+            data = os.fsencode(os.readlink(f))
+            return hashlib.new(alg, f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
+        st = f.lstat()
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_FILE_BYTES:
+            return None
+        h = hashlib.new(alg)
+        h.update(f"blob {st.st_size}\0".encode("ascii"))
+        total = 0
+        with f.open("rb") as fp:
+            while chunk := fp.read(65536):
+                total += len(chunk)
+                if total > st.st_size:
+                    return None
+                h.update(chunk)
+        return h.hexdigest() if total == st.st_size else None
+    except OSError:
+        return None
+
+
+def _dirty_cited(root: Path, paths: list[str], alg: str = "sha1") -> set[str]:
+    """Cited files with uncommitted changes, without git status or configured filters."""
+    if not paths:
+        return set()
+    head_blobs: dict[str, tuple[str, str]] = {}
+    for rec in filter(None, (git(root, "ls-tree", "-r", "-z", "HEAD", "--", *paths, raw=True) or "").split("\0")):
+        meta, _, rel = rec.partition("\t")
+        parts = meta.split(" ")
+        if len(parts) == 3 and rel:
+            head_blobs[rel] = (parts[0], parts[2])
+    idx_blobs: dict[str, set[str]] = defaultdict(set)
+    for rec in filter(None, (git(root, "ls-files", "-s", "-z", "--", *paths, raw=True) or "").split("\0")):
+        meta, _, rel = rec.partition("\t")
+        parts = meta.split(" ")
+        if len(parts) >= 2 and rel:
+            idx_blobs[rel].add(parts[1])
+    dirty = {rel for rel in (git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", *paths, raw=True) or "").split("\0") if rel}
+    for p in paths:
+        if not p.endswith("/") and p not in head_blobs:
+            dirty.add(p)
+    for rel in set(head_blobs) | set(idx_blobs):
+        if rel not in head_blobs:
+            dirty.add(rel)
+            continue
+        mode, head_sha = head_blobs[rel]
+        if idx_blobs.get(rel) != {head_sha}:
+            dirty.add(rel)
+        elif mode != "160000" and _blob_id(root / rel, alg, symlink=(mode == "120000")) != head_sha:
+            dirty.add(rel)
+    return dirty
 
 
 def _count_lines(f: Path, limit: int = MAX_FILE_BYTES) -> int | None:
     """Count lines in regular file f in bounded chunks; return None if non-regular or over limit bytes."""
     try:
-        st = f.stat()
+        st = f.lstat()
     except OSError:
         return None
     if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
@@ -112,6 +181,25 @@ def _count_lines(f: Path, limit: int = MAX_FILE_BYTES) -> int | None:
     except OSError:
         return None
     return lines + (1 if total and last != b"\n" else 0)
+
+
+def _bad_text(s: str) -> str | None:
+    """Return a reason if s contains characters whose layout or width cannot be bounded, else None."""
+    marks = 0
+    for ch in s:
+        cp = ord(ch)
+        cat = unicodedata.category(ch)
+        if cat[0] == "C" or cat in ("Zl", "Zp"):
+            return f"contains disallowed control, format or invalid character U+{cp:04X}"
+        if cat[0] == "M":
+            marks += 1
+            if marks > 2:
+                return "has more than two combining marks on one character"
+            continue
+        marks = 0
+        if 0x10000 <= cp < 0x1F000 or cp >= 0x40000:
+            return f"contains character U+{cp:04X} whose width cannot be bounded"
+    return None
 
 
 # ---------------------------------------------------------------- checking
@@ -132,53 +220,72 @@ def check(m: dict, root: Path, in_git: bool) -> tuple[list[str], dict]:
             return ""
         if len(v) > LIMITS[key]:
             bad(f'{where}: "{key}" is {len(v)} characters; say it in {LIMITS[key]} or fewer')
+        if reason := _bad_text(v):
+            bad(f'{where}: "{key}" {reason}')
         return v
 
     def cite(s: object, where: str, step: bool) -> Cite | None:
-        mt = re.fullmatch(r"([^:]+?)(?::(\d+)(?:-(\d+))?)?", s) if isinstance(s, str) else None
+        if not isinstance(s, str):
+            bad(f"{where}: {s!r} is not a citation; write path:start-end")
+            return None
+        if any(unicodedata.category(ch)[0] == "C" or unicodedata.category(ch) in ("Zl", "Zp") for ch in s):
+            bad(f"{where}: {s!r} contains disallowed control or invalid characters")
+            return None
+        mt = re.fullmatch(r"([^:]+?)(?::(\d{1,9})(?:-(\d{1,9}))?)?", s)
         if not mt:
             bad(f"{where}: {s!r} is not a citation; write path:start-end")
             return None
         path, a = mt[1], int(mt[2]) if mt[2] else None
         b = int(mt[3]) if mt[3] else a
         p_obj = Path(path)
-        if path.startswith(("/", "~")) or p_obj.is_absolute() or ".." in p_obj.parts:
+        if path.startswith(("/", "~")) or p_obj.is_absolute() or ".." in p_obj.parts or not p_obj.parts:
             bad(f"{where}: {path} must be a path relative to the repository root")
             return None
+        cur = root
+        for part in p_obj.parts:
+            cur = cur / part
+            try:
+                if cur.is_symlink():
+                    bad(f"{where}: {path} traverses or names a symlink, which cannot be cited")
+                    return None
+            except (OSError, ValueError):
+                bad(f"{where}: {path} cannot be resolved")
+                return None
         f = root / path
         try:
             real = f.resolve()
-        except OSError:
+        except (OSError, ValueError):
             bad(f"{where}: {path} cannot be resolved")
             return None
         if not real.is_relative_to(root_real):
             bad(f"{where}: {path} resolves outside {root.name}")
             return None
+        norm_path = "/".join(p_obj.parts)
         if real.is_dir() and not step and a is None:
-            c = Cite(path.rstrip("/") + "/", None, None)
+            c = Cite(norm_path + "/", None, None)
         elif not real.is_file():
             bad(f"{where}: {path} is not a file in {root.name}")
             return None
         elif a is None:
             if step:
-                bad(f"{where}: cite the lines that show the step ({path}:start-end)")
+                bad(f"{where}: cite the lines that show the step ({norm_path}:start-end)")
                 return None
-            c = Cite(path, None, None)
+            c = Cite(norm_path, None, None)
         else:
-            if path not in line_counts:
+            if norm_path not in line_counts:
                 counted = _count_lines(real, MAX_FILE_BYTES)
                 if counted is None:
                     bad(f"{where}: {path} is too large or not a regular file (limit {MAX_FILE_BYTES} bytes)")
                     return None
-                line_counts[path] = counted
-            n = line_counts[path]
+                line_counts[norm_path] = counted
+            n = line_counts[norm_path]
             if not 1 <= a <= b <= n:
                 bad(f"{where}: {path} has {n} lines; {a}-{b} is outside it")
                 return None
             if step and b - a + 1 > MAX_CITED_LINES:
                 bad(f"{where}: {s} spans {b - a + 1} lines; cite the call site, at most {MAX_CITED_LINES} lines")
                 return None
-            c = Cite(path, a, b)
+            c = Cite(norm_path, a, b)
         cited_by[c.path].append(where)
         return c
 
@@ -285,16 +392,15 @@ def check(m: dict, root: Path, in_git: bool) -> tuple[list[str], dict]:
         if not 1 <= len(steps) <= MAX_STEPS:
             bad(f"{fw} has {len(steps)} steps; it needs 1 to {MAX_STEPS} (coarser parts, or split the question)")
         reached: set[str] = set()
+        valid_steps: list[dict] = []
         for si, s in enumerate(steps):
             sw = f"{fw}, step {si + 1}"
             if not isinstance(s, dict):
                 bad(f"{sw}: must be an object")
-                steps[si] = {"_skip": True}
                 continue
             a, b = s.get("from"), s.get("to")
             if not isinstance(a, str) or not isinstance(b, str) or a not in by or b not in by or a == b:
                 bad(f'{sw}: "from" and "to" must name two different parts (got {a!r} to {b!r})')
-                steps[si] = {"_skip": True}
                 continue
             if si and not {a, b} & reached:     # a consumer may pick up from a store the flow has reached
                 bad(f'{sw} joins "{a}" and "{b}", neither of which this flow has reached yet; a step is missing before it')
@@ -313,7 +419,8 @@ def check(m: dict, root: Path, in_git: bool) -> tuple[list[str], dict]:
                         f"step: cite the call site in its code (the receiving code when the actor is outside the "
                         f'repository), or add the file to that part\'s "src" if it belongs there.')
             s["_src"] = c
-        f["steps"] = [s for s in steps if not s.get("_skip")]
+            valid_steps.append(s)
+        f["steps"] = valid_steps
     for pid in by:
         if pid not in used:
             bad(f'part "{pid}" is in no flow; remove it or add the step that uses it')
@@ -337,8 +444,11 @@ def check(m: dict, root: Path, in_git: bool) -> tuple[list[str], dict]:
             for ui, u in enumerate(raw_unknowns):
                 if not isinstance(u, str) or not u.strip():
                     bad(f'unknown {ui + 1}: must be non-empty text')
-                elif len(u) > LIMITS["unknown"]:
-                    bad(f'unknown {ui + 1}: is {len(u)} characters; say it in {LIMITS["unknown"]} or fewer')
+                else:
+                    if len(u) > LIMITS["unknown"]:
+                        bad(f'unknown {ui + 1}: is {len(u)} characters; say it in {LIMITS["unknown"]} or fewer')
+                    if reason := _bad_text(u):
+                        bad(f'unknown {ui + 1}: {reason}')
 
     ctx = {"groups": groups, "commit": None, "when": date.today().isoformat(), "dirty": set(), "base": None}
     if in_git:
@@ -346,19 +456,19 @@ def check(m: dict, root: Path, in_git: bool) -> tuple[list[str], dict]:
         commit = m.get("commit")
         is_hex = isinstance(commit, str) and bool(re.fullmatch(r"[0-9a-fA-F]{7,40}", commit))
         full = git(root, "rev-parse", "--verify", "--end-of-options", f"{commit}^{{commit}}") if is_hex else None
-        if not full:
+        if not full or not full.lower().startswith(commit.lower()):
             bad(f'set "commit" to a 7-40 character hex commit SHA the code was read at (HEAD is {head})')
         else:
             paths = sorted(cited_by)
-            moved = (git(root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", full, "HEAD", "--", *paths) or "") if paths else ""
-            for path in filter(None, moved.split("\n")):
+            moved = (git(root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", full, "HEAD", "--", *paths, raw=True) or "") if paths else ""
+            for path in filter(None, moved.split("\0")):
                 who = sorted({w for p, ws in cited_by.items() if path == p or (p.endswith("/") and path.startswith(p)) for w in ws})
                 bad(f'{path} changed since {full[:7]}: re-read it (cited by {"; ".join(who)}), correct the map, '
                     f'then set "commit" to {head}')
-            status = (git(root, "status", "--porcelain", "-uall", "--", *paths) or "") if paths else ""
+            alg = "sha256" if head and len(head) == 64 else "sha1"
             when = git(root, "show", "-s", "--no-ext-diff", "--no-textconv", "--format=%cs", "--end-of-options", full)
             ctx.update(commit=full, when=when or ctx["when"],
-                       dirty={ln[3:] for ln in status.split("\n") if ln}, base=github_base(root, full))
+                       dirty=_dirty_cited(root, paths, alg), base=github_base(root, full))
     return errs, ctx
 
 
@@ -377,8 +487,8 @@ def github_base(root: Path, commit: str) -> str | None:
 # ---------------------------------------------------------------- layout
 
 _CHAR_W = {
-    **dict.fromkeys("ijl'.,:;|/\\ ", 0.27),
-    **dict.fromkeys("ftr()[]-!IJ", 0.34),
+    **dict.fromkeys("ijl'., ", 0.27),
+    **dict.fromkeys("ftr()[]-!IJ:;|/\\", 0.36),
     **dict.fromkeys("csz", 0.47),
     **dict.fromkeys("kvxy", 0.51),
     **dict.fromkeys("0123456789", 0.59),
@@ -386,29 +496,39 @@ _CHAR_W = {
     **dict.fromkeys("#+<=>^~&→←↑↓↔", 0.76),
     **dict.fromkeys("@%…—", 0.95),
     "m": 0.89, "w": 0.76, "M": 0.90, "W": 0.99,
+    "\u2001": 1.05, "\u2003": 1.05, "\u2030": 1.6, "\u2031": 2.1,
+    "\u2a0c": 1.6, "\u2b33": 1.7,
+    "\u2e3a": 2.4, "\u2e3b": 3.5,
+    "\ufdfa": 9.0, "\ufdfb": 5.0, "\ufdfc": 1.5, "\ufdfd": 7.5,
 }
+
+
+def _glyph_w(ch: str, expand: bool = True) -> float:
+    cat = unicodedata.category(ch)
+    if cat in ("Mn", "Cf"):
+        return 0.0
+    if ch in _CHAR_W:
+        return _CHAR_W[ch]
+    if ord(ch) >= 0x1F000 or cat == "So":
+        return 1.35
+    if unicodedata.east_asian_width(ch) in ("W", "F"):
+        return 1.08
+    if cat == "Mc":
+        return 1.7
+    if cat == "Me":
+        return 1.0
+    if expand and ord(ch) > 127:
+        decomp = unicodedata.normalize("NFKC", ch)
+        if len(decomp) > 1:
+            return max(0.68, sum(_glyph_w(d, expand=False) for d in decomp))
+    if ch.isupper():
+        return 0.65
+    return 0.68 if ord(ch) > 127 else 0.59
 
 
 def text_w(s: str, size: float, bold: bool = False) -> float:
     """Estimated width of s in the page's primary fonts (Avenir Next, Segoe UI), keeping wide CJK/emoji/symbols and bold."""
-    w = 0.0
-    for ch in s:
-        cat = unicodedata.category(ch)
-        if cat in ("Mn", "Cf"):
-            continue
-        if ord(ch) >= 0x1F000 or cat == "So":
-            w += 1.35
-        elif unicodedata.east_asian_width(ch) in ("W", "F"):
-            w += 1.08
-        elif ch in _CHAR_W:
-            w += _CHAR_W[ch]
-        elif ch.isupper():
-            w += 0.65
-        elif ord(ch) > 127:
-            w += 0.68
-        else:
-            w += 0.59
-    return w * size * (1.11 if bold else 1.0)
+    return sum(_glyph_w(ch) for ch in s) * size * (1.11 if bold else 1.0)
 
 
 def step_w(s: str, size: float = 12.0) -> float:
@@ -540,7 +660,7 @@ def arrow_near(g_arrow: dict, rect: tuple[float, float, float, float], m: float 
 
 
 def _spot_for(g_arrow: dict, fi: int) -> tuple[float, float, int]:
-    """Label anchor (lx, ly, side) for flow fi, falling back to the arrow's shared resting anchor."""
+    """Label anchor (lx, ly, side) for flow fi, falling back to the arrow's shared anchor."""
     ls = g_arrow.get("labels")
     if ls is not None and fi < len(ls) and ls[fi] is not None:
         return ls[fi]
@@ -606,6 +726,10 @@ def _format_clash(picture: str, flow: int, kind: str, a_arr: str, a_txt: str,
     if kind == "part_text":
         return f'{head}: part "{a_arr}" text ({a_txt}) overflows its box'
     a_desc = f"{a_arr} ({a_txt})" if a_txt else a_arr
+    if kind == "min_font":
+        if b_val == a_arr:
+            return f'{head}: part "{a_arr}" text ({a_txt}) would shrink below 9 px{suffix}'
+        return f"{head}: label on {a_desc} would shrink below 9 px{suffix}"
     if kind == "label":
         hit = f"label on {b_val}" + (f" ({b_txt})" if b_txt else "")
     elif kind == "part":
@@ -992,17 +1116,14 @@ def _layout_once(topo: dict, arrows: dict[tuple[str, str], dict],
     def _pack_geo(per_flow: dict[tuple[str, str], list[tuple[float, float, int] | None]] | None = None) -> dict:
         geo_arrows, reach_x, reach_y = {}, [0.0, width], [0.0, height]
         for k, pair in enumerate(pairs):
-            spot = placed[k]
-            entry = {**paths[k][0], "label": spot}
+            entry = {**paths[k][0], "label": placed[k]}
             if per_flow is not None:
                 entry["labels"] = per_flow[pair]
-            edge = label_box(*spot, (arrows[pair]["label_w"], 0.0))
-            reach_x = [min(reach_x[0], edge[0] - 4.0), max(reach_x[1], edge[1] + 4.0)]
-            extra = [label_box(*spot, r_sz)] if (r_sz := arrows[pair].get("resting_size")) else []
-            extra += [label_box(*_spot_for(entry, fi), sz) for fi, sz in enumerate(arrows[pair]["label_sizes"]) if sz]
-            for lb in extra:
-                reach_x = [min(reach_x[0], lb[0] - 4.0), max(reach_x[1], lb[1] + 4.0)]
-                reach_y = [min(reach_y[0], lb[2] - 4.0), max(reach_y[1], lb[3] + 4.0)]
+            for fi, sz in enumerate(arrows[pair]["label_sizes"]):
+                if sz:
+                    lb = label_box(*_spot_for(entry, fi), sz)
+                    reach_x = [min(reach_x[0], lb[0] - 4.0), max(reach_x[1], lb[1] + 4.0)]
+                    reach_y = [min(reach_y[0], lb[2] - 4.0), max(reach_y[1], lb[3] + 4.0)]
             geo_arrows[pair] = entry
         return {"x0": reach_x[0], "y0": reach_y[0], "w": reach_x[1] - reach_x[0], "h": reach_y[1] - reach_y[0],
                 "arrows": geo_arrows, "boxes": pboxes, "parts": {i: (x[i], y[i], *size[i], words[i]) for i in ids}}
@@ -1387,14 +1508,10 @@ def view(parts: list[dict], groups: dict, flows: list[dict], inside: str | None)
                 arr["verbs"].append(verb)
             arr["seen"] = arr["seen"] or s["_src"] is not None
             arr["shown"][fi].append(f"{si + 1} {verb}")
-    for arr in arrows.values():             # an arrow's label: its verbs, or the open flow's numbered steps
-        resting = arr["verbs"][:2] + ["…"] * (len(arr["verbs"]) > 2)
-        arr["label"] = "\n".join(resting)
+    for arr in arrows.values():             # an arrow's checked labels: one per flow that uses it
         arr["label_sizes"] = [(max(step_w(t, FA) for t in lines) + 6, LINE * len(lines) + 5) if lines else None
                               for lines in arr["shown"]]
-        arr["resting_w"] = max(step_w(t, FA) for t in resting) + 6
-        arr["resting_size"] = (arr["resting_w"], LINE * len(resting) + 5)
-        arr["label_w"] = max(arr["resting_w"], *(sz[0] for sz in arr["label_sizes"] if sz))
+        arr["label_w"] = max((sz[0] for sz in arr["label_sizes"] if sz), default=0.0)
     return at, list(nodes.values()), arrows
 
 
@@ -1404,12 +1521,10 @@ def draw(name: str, nodes: list[dict], arrows: dict, geo: dict) -> str:
         g = geo["arrows"][a, b]
         cls = "arrow" + ("" if arr["seen"] else " unseen")
         ea, eb = esc(a), esc(b)
-        lines.append(f'<g class="{cls}" data-arrow="{ea}&gt;{eb}"><path class="hit" d="{g["d"]}"/><path class="mark" d="{g["d"]}"/>'
+        lines.append(f'<g class="{cls}" data-arrow="{ea}&gt;{eb}" data-verbs="{esc(", ".join(arr["verbs"]))}">'
+                     f'<path class="hit" d="{g["d"]}"/><path class="mark" d="{g["d"]}"/>'
                      f'<path class="line" d="{g["d"]}"/><path class="head" d="{g["head"]}"/></g>')
-        lx, ly, side = g["label"]
-        anchor = ("end", "middle", "start")[side + 1]
-        labels.append(f'<text class="{cls}" data-arrow="{ea}&gt;{eb}" data-label="{esc(arr["label"])}" '
-                      f'style="text-anchor:{anchor}" x="{lx + LABEL_GAP * side:.1f}" y="{ly + 4:.1f}">{esc(arr["label"].replace(chr(10), ", "))}</text>')
+        labels.append(f'<text class="{cls}" data-arrow="{ea}&gt;{eb}"></text>')
     for p in nodes:
         x, y, w, h, ls = geo["parts"][p["id"]]
         x0, y0 = x - w / 2, y - h / 2
@@ -1473,7 +1588,6 @@ def build(m: dict, root: Path, ctx: dict) -> tuple[str, dict]:
             continue
         v_arrows = {
             f"{a}>{b}": {
-                "r": _label_spec(arr["resting_w"], geo["arrows"][a, b]["label"]),
                 "f": [_label_spec(sz[0], _spot_for(geo["arrows"][a, b], fi)) if sz else None
                       for fi, sz in enumerate(arr["label_sizes"])],
             }
@@ -1565,10 +1679,13 @@ def pictures(m: dict) -> list[tuple[str, str]]:
 
 
 def _resolve_chrome() -> tuple[str | None, bool]:
-    """Return (chrome_binary, fail_if_missing). Respects EXPLAIN_CODEBASE_CHROME and EXPLAIN_CODEBASE_REQUIRE_CHROME."""
+    """Return (chrome_binary, fail_if_missing). Respects EXPLAIN_CODEBASE_CHROME (including 'none') and EXPLAIN_CODEBASE_REQUIRE_CHROME."""
     env = os.environ.get("EXPLAIN_CODEBASE_CHROME")
-    if env:
-        return env, True
+    if env is not None:
+        if env.strip().lower() == "none":
+            return None, bool(os.environ.get("EXPLAIN_CODEBASE_REQUIRE_CHROME"))
+        if env:
+            return env, True
     if CHROME and Path(CHROME).exists():
         return CHROME, True
     if os.environ.get("EXPLAIN_CODEBASE_REQUIRE_CHROME"):
@@ -1655,6 +1772,8 @@ BROWSER_PROBE = r"""
           const labels = all('text.arrow.on', svg).map(el => ({
             arrow: el.dataset.arrow,
             text: [...el.querySelectorAll(':scope > tspan')].map(t => t.textContent).join(', '),
+            tooSmall: el.dataset.tooSmall === '1'
+              || all(':scope > tspan', el).some(t => parseFloat(getComputedStyle(t).fontSize) < 8.99),
             r: el.getBBox(),
           }));
           const boxes = all('g.part', svg).map(el => {
@@ -1662,8 +1781,10 @@ BROWSER_PROBE = r"""
             const sr = shapes.length ? shapes[shapes.length - 1].getBBox() : el.getBBox();
             all('text', el).forEach(t => {
               const tr = t.getBBox();
-              if (tr.width > 0 && (tr.x < sr.x || tr.x + tr.width > sr.x + sr.width)) {
-                out.push({ picture: v, flow: fi, kind: 'part_text', a: el.dataset.part, a_text: t.textContent, b: el.dataset.part });
+              const small = t.dataset.tooSmall === '1' || parseFloat(getComputedStyle(t).fontSize) < 8.99;
+              if (small || (tr.width > 0 && (tr.x < sr.x || tr.x + tr.width > sr.x + sr.width))) {
+                out.push({ picture: v, flow: fi, kind: small ? 'min_font' : 'part_text',
+                           a: el.dataset.part, a_text: t.textContent, b: el.dataset.part });
               }
             });
             return { part: el.dataset.part, r: el.getBBox() };
@@ -1679,6 +1800,9 @@ BROWSER_PROBE = r"""
           });
           for (let i = 0; i < labels.length; i++) {
             const a = labels[i];
+            if (a.tooSmall) {
+              out.push({ picture: v, flow: fi, kind: 'min_font', a: a.arrow, a_text: a.text, b: '9px' });
+            }
             if (outside(a.r)) {
               out.push({ picture: v, flow: fi, kind: 'edge', a: a.arrow, a_text: a.text, b: 'viewBox' });
             }
@@ -1805,9 +1929,10 @@ def format_browser_breach(item: dict) -> str:
     kind = str(item.get("kind") or "")
     a_val = str(item.get("a", ""))
     b_val = str(item.get("b", ""))
+    is_part = kind == "part_text" or (kind == "min_font" and b_val == a_val)
     return _format_clash(
         item.get("picture") or "", int(item.get("flow", 0)), kind,
-        a_val if kind == "part_text" else a_val.replace(">", "->"),
+        a_val if is_part else a_val.replace(">", "->"),
         item.get("a_text") or "",
         b_val.replace(">", "->") if kind in ("label", "arrow") else b_val,
         item.get("b_text") or "",
@@ -1837,28 +1962,76 @@ def _write_atomic(out: Path, text: str) -> None:
         raise
 
 
+def _has_symlink_component(start: Path, root_real: Path) -> bool:
+    """True if start or any ancestor down from root_real is a symlink, or if root_real is never reached."""
+    cur = start
+    while True:
+        if cur.is_symlink():
+            return True
+        if cur.resolve() == root_real:
+            return False
+        parent = cur.parent
+        if parent == cur:
+            return True
+        cur = parent
+
+
+def _symlink_inside_enclosing_repo(raw_src: Path) -> Path | None:
+    """If a lexical ancestor of raw_src contains .git and a symlink lies below it, return that symlink."""
+    sym: Path | None = None
+    cur = raw_src
+    while True:
+        if cur.is_symlink():
+            sym = sym or cur
+        elif (cur / ".git").exists() or (cur / ".git").is_symlink():
+            return sym
+        parent = cur.parent
+        if parent == cur:
+            return None
+        cur = parent
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__)
         return 2
-    raw_src = Path(os.path.abspath(sys.argv[1]))
-    if raw_src.is_symlink() or raw_src.parent.is_symlink():
-        print(f"error: {raw_src} and its parent directory must not be symlinks; nothing written.")
+    arg = sys.argv[1]
+    if "\x00" in arg or any(unicodedata.category(ch)[0] == "C" for ch in arg):
+        print(f"error: invalid map path {arg!r}; nothing written.")
         return 1
-    root, in_git = find_root(raw_src)
-    root_real = root.resolve()
     try:
+        raw_src = Path(os.path.abspath(arg))
+        if not os.path.isabs(arg):
+            cur = Path.cwd()
+            for part in Path(arg).parts:
+                cur = cur / part
+                if cur.is_symlink():
+                    print(f"error: {raw_src} traverses symlink {cur}; nothing written.")
+                    return 1
+        if sym := _symlink_inside_enclosing_repo(raw_src):
+            print(f"error: {raw_src} traverses symlink {sym} inside the repository; nothing written.")
+            return 1
+        root, in_git = find_root(raw_src)
+        root_real = root.resolve()
         src_real = raw_src.resolve()
         out_dir_real = raw_src.parent.resolve()
-    except OSError as e:
-        print(f"error: cannot resolve {raw_src}: {e}; nothing written.")
+        raw_out = raw_src.with_suffix(".html")
+        out = src_real.with_suffix(".html")
+        if _has_symlink_component(raw_src, root_real) or raw_out.is_symlink() or out.is_symlink():
+            print(f"error: {raw_src} and every directory between {root_real} and {out} must not be symlinks; nothing written.")
+            return 1
+        if out == src_real:
+            print(f"error: {raw_src} must not already end with .html; nothing written.")
+            return 1
+        if in_git and (root_real / ".git").is_symlink():
+            print(f"error: {root_real / '.git'} must not be a symlink; nothing written.")
+            return 1
+    except (OSError, ValueError) as e:
+        print(f"error: cannot resolve {arg!r}: {e}; nothing written.")
         return 1
-    if not src_real.is_relative_to(root_real) or not out_dir_real.is_relative_to(root_real):
-        print(f"error: {raw_src} resolves outside repository root {root_real}; nothing written.")
-        return 1
-    out = raw_src.with_suffix(".html")
-    if out.is_symlink():
-        print(f"error: output path {out} must not be a symlink; nothing written.")
+    docs_real = root_real / "docs"
+    if not src_real.is_relative_to(docs_real) or not out_dir_real.is_relative_to(docs_real) or src_real == docs_real:
+        print(f"error: {raw_src} must be inside {docs_real}; nothing written.")
         return 1
     try:
         st = src_real.stat()
@@ -1871,7 +2044,7 @@ def main() -> int:
             print(f"error: {raw_src} exceeds {MAX_MAP_BYTES} bytes; nothing written.")
             return 1
         m = json.loads(raw_bytes.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as e:
         print(f"error: cannot read {raw_src}: {e}")
         return 1
     errs, ctx = check(m, root, in_git and git(root, "rev-parse", "HEAD") is not None)
@@ -1910,12 +2083,16 @@ def main() -> int:
         print(f"error: cannot write {out}: {e}; nothing written.")
         return 1
     print(f"{out}  ({', '.join(f'{n} {k}' for k, n in counts.items())})")
+    chrome_opt_out = (os.environ.get("EXPLAIN_CODEBASE_CHROME") or "").strip().lower() == "none"
     if shots:
         print("screenshots, one per flow on the overview, then one per group:", *shots, sep="\n  ")
+    elif chrome_opt_out:
+        print("no screenshots (EXPLAIN_CODEBASE_CHROME=none): open the page to check it")
     else:
         print("no screenshots (Chrome missing or too slow): open the page to check it")
     if b_errs is None:
-        print("not checked in a browser (Chrome missing)")
+        reason = "EXPLAIN_CODEBASE_CHROME=none" if chrome_opt_out else "Chrome missing"
+        print(f"not checked in a browser ({reason})")
     else:
         print("browser check: all labels clear")
     return 0

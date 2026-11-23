@@ -60,7 +60,7 @@
   .arrow .mark { fill: none; stroke: var(--mark); stroke-width: 9; stroke-linecap: round; opacity: 0; }
   text.arrow { font-size: 12px; fill: var(--ink); paint-order: stroke; stroke: var(--plate); stroke-width: 5px; stroke-linejoin: round; }
   text.arrow tspan tspan { font-weight: 700; }
-  svg text.arrow:not(.on):not(.now) { opacity: 0; }
+  svg text.arrow:not(.on) { opacity: 0; pointer-events: none; }
   svg [data-part], svg [data-arrow] { transition: opacity .15s; }
   svg.has-flow [data-part]:not(.on), svg.has-flow [data-arrow]:not(.on) { opacity: .38; }
   .arrow.on, .arrow.now { color: var(--ink); }
@@ -138,20 +138,24 @@
   const labelOf = arrow => svg.querySelector('text[data-arrow="' + arrow + '"]');
   const address = (v = view) => '#' + (v && v + '/') + (flows.findIndex(d => d.open) + 1);
 
-  // Shrink any line wider than its reserved width; never enlarge.
+  // Shrink any line wider than its reserved width; never enlarge, never shrink below 9 px.
   function fit(text, maxW, baseSize) {
     if (!maxW || maxW <= 0) return;
     const spans = all(':scope > tspan', text);
+    let tooSmall = false;
     for (const el of spans.length ? spans : [text]) {
       el.style.fontSize = '';
       let len = el.getComputedTextLength(), fs = baseSize;
       for (const factor of [100, 99]) {
         if (!(len > maxW)) break;
-        fs = Math.min(fs, Math.floor(fs * (maxW / len) * factor) / 100);
+        fs = Math.max(9, Math.min(fs, Math.floor(fs * (maxW / len) * factor) / 100));
         el.style.fontSize = fs + 'px';
         len = el.getComputedTextLength();
       }
+      if (len > maxW) tooSmall = true;
     }
+    if (tooSmall) text.dataset.tooSmall = '1';
+    else delete text.dataset.tooSmall;
   }
 
   // Fit every part box's name once per picture while that picture is visible.
@@ -172,8 +176,9 @@
     const flowIdx = flows.indexOf(flow), aMeta = cur.arrows, pMeta = cur.parts;
     all('.on', svg).forEach(e => e.classList.remove('on'));
     all('text[data-arrow]', svg).forEach(t => {
-      const m = own(aMeta, t.dataset.arrow, null);
-      write(t, t.dataset.label.split('\n').map(verb => ['', verb]), m && m.r);
+      t.textContent = '';
+      delete t.dataset.maxW;
+      delete t.dataset.tooSmall;
     });
     all('text.sub', svg).forEach(t => {
       t.textContent = t.dataset.sub;
@@ -239,11 +244,12 @@
     if (!el) return;
     const { arrow, part } = el.dataset, said = document.createElement('b');
     if (arrow) {
-      [...all('[data-arrow="' + arrow + '"]', svg), ...all('li[data-arrow="' + arrow + '"]'), ...ends(arrow).map(box)].forEach(e => e.classList.add('now'));
-      const t = labelOf(arrow);
-      if (t && t.dataset.maxW) fit(t, +t.dataset.maxW, 12);
+      const g = svg.querySelector('g[data-arrow="' + arrow + '"]'), t = labelOf(arrow);
+      const lit = [g, ...(t && t.classList.contains('on') ? [t] : []), ...all('li[data-arrow="' + arrow + '"]'), ...ends(arrow).map(box)].filter(Boolean);
+      lit.forEach(e => e.classList.add('now'));
+      if (t && t.classList.contains('on') && t.dataset.maxW) fit(t, +t.dataset.maxW, 12);
       said.textContent = ends(arrow).map(id => names[id]).join(' → ');
-      caption.replaceChildren(said, ' ' + t.dataset.label.replaceAll('\n', ', '));
+      caption.replaceChildren(said, ' ' + (g ? g.dataset.verbs : ''));
     } else {
       const here = box(part) ? part : own(views[view].at, part);      // a part inside a closed group lights the group
       const lit = here ? [box(here), ...all('g[data-arrow]', svg).filter(e => ends(e.dataset.arrow).includes(here))] : [];
