@@ -10,6 +10,7 @@ Large codebases are drawn at two levels. The overview shows at most ten boxes; p
 
 `render.py` reads the map the agent writes (`docs/how-it-works.json`) and refuses to draw it, listing the problems found, when:
 
+- the map is not under the repository root's `docs/` directory, or a path component between the root and the output is a symlink;
 - a cited file or line does not exist, a cited path uses a symlink, or a file changed since the commit the map records;
 - a step's evidence is not in the code of the part that acts;
 - a step does not touch a part its flow has already reached, or a part is on no route;
@@ -40,6 +41,10 @@ Or ask in plain words: "how does this work", "draw me the architecture", "what h
 The JSON map stays beside the page. A later session reads it instead of exploring the code again, and when the code changes the renderer names the parts and steps whose citations went stale.
 
 The page needs no server: open the HTML file. It follows the system's light or dark setting, and the reader can switch between them.
+
+## Trust
+
+The renderer runs read-only git commands in the repository, and running git inside a `.git` folder from someone you do not trust is unsafe in general (as git's own documentation warns), so render such a repository from a fresh clone.
 
 ## Tests
 

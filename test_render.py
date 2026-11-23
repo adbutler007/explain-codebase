@@ -1053,9 +1053,9 @@ class ClosingInvariants(unittest.TestCase):
             script.write_text(f"#!/bin/sh\necho \"$@\" >> {pwn}\nexit 0\n", encoding="utf-8")
             script.chmod(0o755)
 
-            # Non-ASCII cited file + .gitattributes filter/diff drivers.
+            # Non-ASCII cited file + .gitattributes filter/diff drivers on src/api.py (filtered files are unverified per Finding 4).
             (root / "src/café.py").write_text("line 1\nline 2\n", encoding="utf-8")
-            (root / ".gitattributes").write_text("* filter=evil diff=evil\n", encoding="utf-8")
+            (root / ".gitattributes").write_text("src/api.py filter=evil diff=evil\n", encoding="utf-8")
             subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
             subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "cafe"], check=True)
 
@@ -1322,6 +1322,387 @@ class ClosingInvariants(unittest.TestCase):
         self.assertNotIn("checks every label", readme)
         self.assertNotIn("It prints every problem and writes nothing", skill)
         self.assertIn("beside", skill)
+
+
+class ReplayFixes(unittest.TestCase):
+    """Regression tests for replay audit findings 1-8 and 10 (plus Finding 9 Mc over-reservation)."""
+
+    def test_f1_lazy_fetch_blocked_failed_git_is_error_and_readme_trust(self) -> None:
+        tmp, root, m = _make_repo(with_git=True)
+        helper_dir = tempfile.TemporaryDirectory()
+        try:
+            hd = Path(helper_dir.name).resolve()
+            pwn = hd / "lazy_pwned"
+            uploadpack = hd / "evil_uploadpack.sh"
+            uploadpack.write_text(f"#!/bin/sh\necho PWNED >> {pwn}\nexit 1\n", encoding="utf-8")
+            uploadpack.chmod(0o755)
+
+            # Delete HEAD's loose tree object and configure a promisor partial-clone remote.
+            tree_sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD^{tree}"],
+                                      capture_output=True, text=True, check=True).stdout.strip()
+            obj = root / ".git/objects" / tree_sha[:2] / tree_sha[2:]
+            self.assertTrue(obj.exists())
+            obj.unlink()
+            for k, v in (
+                ("core.repositoryformatversion", "1"),
+                ("extensions.partialClone", "evil"),
+                ("remote.evil.url", str(hd)),
+                ("remote.evil.promisor", "true"),
+                ("remote.evil.uploadpack", str(uploadpack)),
+                ("protocol.file.allow", "always"),
+            ):
+                subprocess.run(["git", "-C", str(root), "config", k, v], check=True)
+
+            seen: list[tuple[list[str], dict]] = []
+            real_run = subprocess.run
+
+            def spy(cmd, *a, **kw):
+                seen.append((list(cmd), dict(kw.get("env") or {})))
+                return real_run(cmd, *a, **kw)
+
+            with mock.patch.object(subprocess, "run", side_effect=spy):
+                errs, _ = render.check(copy.deepcopy(m), root, True)
+            self.assertFalse(pwn.exists(), "promisor uploadpack must never execute")
+            self.assertTrue(errs, "failing git diff/ls-tree must produce an error, not pass silently")
+            self.assertTrue(seen)
+            for cmd, env in seen:
+                self.assertEqual(env.get("GIT_NO_LAZY_FETCH"), "1")
+                self.assertIn("protocol.allow=never", cmd)
+                for proto in ("file", "ext", "ssh", "git", "http", "https"):
+                    self.assertIn(f"protocol.{proto}.allow=never", cmd)
+
+            map_path = root / "docs/how-it-works.json"
+            map_path.write_text(json.dumps(m), encoding="utf-8")
+            rc, out = _run_main(map_path, chrome=root / "no-chrome")
+            self.assertEqual(rc, 1, out)
+            self.assertFalse(map_path.with_suffix(".html").exists())
+            self.assertFalse(pwn.exists())
+        finally:
+            tmp.cleanup()
+            helper_dir.cleanup()
+
+        readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+        self.assertIn("## Trust", readme)
+        self.assertIn("fresh clone", readme)
+
+    def test_f2_linked_worktree_and_submodule_accepted(self) -> None:
+        tmp, root, m = _make_repo(with_git=True)
+        extra = tempfile.TemporaryDirectory()
+        try:
+            ed = Path(extra.name).resolve()
+            no_chrome = root / "no-chrome"
+
+            # 1) Linked worktree (with .git file -> <main>/.git/worktrees/<name>)
+            wt = ed / "wt"
+            subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", str(wt)], check=True)
+            (wt / "docs").mkdir(exist_ok=True)
+            wt_map = wt / "docs/how-it-works.json"
+            wt_map.write_text(json.dumps(m), encoding="utf-8")
+            found_wt, in_git_wt = render.find_root(wt_map)
+            self.assertTrue(in_git_wt)
+            self.assertEqual(found_wt.resolve(), wt)
+            rc_wt, out_wt = _run_main(wt_map, chrome=no_chrome)
+            self.assertEqual(rc_wt, 0, out_wt)
+            self.assertTrue(wt_map.with_suffix(".html").exists())
+
+            # core.worktree poisoned inside the worktree's gitdir still keeps root pinned to wt.
+            subprocess.run(["git", "-C", str(wt), "config", "core.worktree", "../.."], check=True)
+            found_wt2, _ = render.find_root(wt_map)
+            self.assertEqual(found_wt2.resolve(), wt)
+            errs_wt, _ = render.check(copy.deepcopy(m), found_wt2, True)
+            self.assertEqual(errs_wt, [])
+            subprocess.run(["git", "-C", str(wt), "config", "--unset", "core.worktree"], check=True)
+
+            # 2) Submodule (with .git file -> ../.git/modules/sub)
+            sup = ed / "super"
+            sup.mkdir()
+            subprocess.run(["git", "-C", str(sup), "init", "-q"], check=True)
+            subprocess.run(["git", "-C", str(sup), "-c", "protocol.file.allow=always",
+                            "submodule", "add", "-q", str(root), "sub"], check=True)
+            subprocess.run(["git", "-C", str(sup), "-c", "user.name=t", "-c", "user.email=t@t",
+                            "commit", "-q", "-m", "add sub"], check=True)
+            sub_root = sup / "sub"
+            (sub_root / "docs").mkdir(exist_ok=True)
+            sub_map = sub_root / "docs/how-it-works.json"
+            sub_map.write_text(json.dumps(m), encoding="utf-8")
+            found_sub, in_git_sub = render.find_root(sub_map)
+            self.assertTrue(in_git_sub)
+            self.assertEqual(found_sub.resolve(), sub_root)
+            rc_sub, out_sub = _run_main(sub_map, chrome=no_chrome)
+            self.assertEqual(rc_sub, 0, out_sub)
+            self.assertTrue(sub_map.with_suffix(".html").exists())
+        finally:
+            tmp.cleanup()
+            extra.cleanup()
+
+    def test_f3_ordinary_multilingual_text_accepted_and_hostile_refused(self) -> None:
+        tmp, root, m = _make_repo(with_git=False)
+        try:
+            # Every example listed by the replay audit as wrongly refused must now pass.
+            allowed_texts = (
+                "می\u200cخواند",           # Persian/Kurdish ZWNJ
+                "ශ්\u200dරී",               # Sinhala ZWJ
+                "র\u200d্যাব",              # Bengali ZWJ
+                "👩\u200d💻",               # emoji ZWJ
+                "👨\u200d👩\u200d👧",       # emoji family ZWJ
+                "🏳\ufe0f\u200d🌈",        # rainbow flag ZWJ
+                "🏴\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f",  # England tag sequence
+                "soft\u00adhyphen",         # soft hyphen
+                "hebrew\u200e\u200f\u061c", # LRM, RLM, ALM
+                "पढ़ें",                    # Hindi with nukta
+                "चीज़ों",                   # Hindi with nukta + vowel + anusvara
+                "ज़िंदगी",                  # Hindi
+                "ਜ਼ਿੰਦਗੀ",                  # Punjabi
+                "မြို့",                    # Burmese (4 marks)
+                "ញ៉ាံ",                     # Khmer
+                "སྐྱེས",                    # Tibetan
+                "הַשָּׁנָה",                  # vocalised Hebrew
+                "🫠🫨",                     # Unicode 14/15 emoji (unassigned on Python 3.10)
+                "\u0378 ok",                # unassigned codepoint (must not depend on Python Unicode version)
+                "𞤀𞤣𞤤𞤢𞤥",                   # Adlam script
+                "𝑓(𝑥)",                     # math italics
+            )
+            for sample in allowed_texts:
+                mc = copy.deepcopy(m)
+                mc["flows"][0]["steps"][0]["verb"] = sample
+                errs, _ = render.check(mc, root, False)
+                self.assertEqual(errs, [], f"ordinary text {sample!r} must be accepted: {errs}")
+
+            # Folder and file names containing ZWNJ must be accepted in citations and main().
+            zwnj_dir = root / "src/می\u200cخواند"
+            zwnj_dir.mkdir()
+            (zwnj_dir / "mod.py").write_text("a\nb\nc\n", encoding="utf-8")
+            m_zwnj = copy.deepcopy(m)
+            m_zwnj["parts"][1]["src"] = ["src/api.py:1-12", "src/می\u200cخواند/mod.py:1-2"]
+            self.assertEqual(render.check(m_zwnj, root, False)[0], [])
+
+            zwnj_proj = root / "می\u200cخواند_proj"
+            (zwnj_proj / "src").mkdir(parents=True)
+            (zwnj_proj / "docs").mkdir()
+            (zwnj_proj / "src/api.py").write_text("".join(f"line {i}\n" for i in range(1, 13)), encoding="utf-8")
+            (zwnj_proj / "src/schema.sql").write_text("create table orders (id);\n", encoding="utf-8")
+            zwnj_map = zwnj_proj / "docs/how-it-works.json"
+            zwnj_map.write_text(json.dumps(GOOD), encoding="utf-8")
+            rc_z, out_z = _run_main(zwnj_map, chrome=root / "no-chrome")
+            self.assertEqual(rc_z, 0, out_z)
+
+            # Hostile inputs must still be refused.
+            hostile_texts = (
+                "a" + "\u0301" * 27,
+                "a" + "\u0302" * 15,
+                "a" + "\u0301" * 3,
+                "a\u0301\u0301\u200c\u0301\u0301",  # ZWNJ cannot split generic mark count
+                "a" + "\u20dd" * 3,
+                "क" + "\u093c" * 5,                 # > 4 marks total
+                "a\nb", "a\x00b", "a\u2028b", "a\ud800b", "a\ue000b",
+                "a\u202ab", "a\u202eb", "a\u2066b", "a\u2069b",  # bidi embeddings/overrides/isolates
+                "a\u0604b",                         # wide Arabic Cf
+                "a\U000e0061b",                     # stray tag character outside emoji tag sequence
+                "\U0001242b",                       # Cuneiform 4.64 em
+            )
+            for bad in hostile_texts:
+                mc = copy.deepcopy(m)
+                mc["flows"][0]["steps"][0]["verb"] = bad
+                self.assertTrue(render.check(mc, root, False)[0], f"hostile text {bad!r} must be refused")
+
+            # Spacing vowel signs (Mc) must not badly over-reserve ordinary Hindi/Bengali/Tamil.
+            self.assertLess(render.text_w("चीज़ों की जाँच करता है", 12), 145.0)
+            self.assertLess(render.text_w("আদেশ সংরক্ষণ করে", 12), 130.0)
+            self.assertLess(render.text_w("ஆணையைச் சேமிக்கிறது", 12), 160.0)
+        finally:
+            tmp.cleanup()
+
+    def test_f4_crlf_autocrlf_filtered_oversized_and_submodule_files(self) -> None:
+        # 1) * text eol=crlf clone: CRLF on disk vs LF in HEAD is clean, real edit is dirty.
+        tmp, root, m = _make_repo(with_git=True)
+        try:
+            (root / ".gitattributes").write_text("* text eol=crlf\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "attrs"], check=True)
+            m["commit"] = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+            (root / "src/api.py").write_bytes("".join(f"line {i}\r\n" for i in range(1, 13)).encode("utf-8"))
+            (root / "src/schema.sql").write_bytes(b"create table orders (id);\r\n")
+            errs, ctx = render.check(copy.deepcopy(m), root, True)
+            self.assertEqual(errs, [])
+            self.assertEqual(ctx["dirty"], set())
+            self.assertEqual(ctx.get("unverified", set()), set())
+            # Real edit with CRLF IS dirty.
+            (root / "src/api.py").write_bytes("".join(f"edited {i}\r\n" for i in range(1, 13)).encode("utf-8"))
+            _, ctx_d = render.check(copy.deepcopy(m), root, True)
+            self.assertEqual(ctx_d["dirty"], {"src/api.py"})
+        finally:
+            tmp.cleanup()
+
+        # 2) core.autocrlf=true without .gitattributes
+        tmp2, root2, m2 = _make_repo(with_git=True)
+        try:
+            subprocess.run(["git", "-C", str(root2), "config", "core.autocrlf", "true"], check=True)
+            (root2 / "src/api.py").write_bytes("".join(f"line {i}\r\n" for i in range(1, 13)).encode("utf-8"))
+            errs, ctx = render.check(copy.deepcopy(m2), root2, True)
+            self.assertEqual(errs, [])
+            self.assertEqual(ctx["dirty"], set())
+            self.assertEqual(ctx.get("unverified", set()), set())
+        finally:
+            tmp2.cleanup()
+
+        # 3) Filtered (LFS-style) and oversized files are "not verified", not "dirty"
+        tmp3, root3, m3 = _make_repo(with_git=True)
+        try:
+            (root3 / ".gitattributes").write_text("src/schema.sql filter=lfs\n", encoding="utf-8")
+            (root3 / "src/big.bin").write_bytes(b"0123456789\n" * 60)
+            subprocess.run(["git", "-C", str(root3), "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(root3), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "lfs-big"], check=True)
+            m3["commit"] = subprocess.run(["git", "-C", str(root3), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+            # Simulate smudged LFS content differing from stored pointer blob in HEAD
+            (root3 / "src/schema.sql").write_text("smudged lfs payload\n", encoding="utf-8")
+            m3["parts"][1]["src"] = ["src/"]
+            with mock.patch.object(render, "MAX_FILE_BYTES", 500):
+                errs, ctx = render.check(m3, root3, True)
+            self.assertEqual(errs, [])
+            self.assertEqual(ctx["dirty"], set())
+            self.assertIn("src/schema.sql", ctx.get("unverified", set()))
+            self.assertIn("src/big.bin", ctx.get("unverified", set()))
+            page, _ = render.build(m3, root3, ctx)
+            self.assertIn("not verified", page)
+            self.assertNotIn("uncommitted changes", page)
+        finally:
+            tmp3.cleanup()
+
+        # 4) Submodule cited from superproject is "not verified", not "dirty"
+        tmp_sub, sub_src, _ = _make_repo(with_git=True)
+        tmp_sup = tempfile.TemporaryDirectory()
+        try:
+            sup = Path(tmp_sup.name).resolve()
+            (sup / "src").mkdir()
+            (sup / "src/api.py").write_text("".join(f"line {i}\n" for i in range(1, 13)), encoding="utf-8")
+            subprocess.run(["git", "-C", str(sup), "init", "-q"], check=True)
+            subprocess.run(["git", "-C", str(sup), "-c", "protocol.file.allow=always",
+                            "submodule", "add", "-q", str(sub_src), "vendor"], check=True)
+            subprocess.run(["git", "-C", str(sup), "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(sup), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "sup"], check=True)
+            sup_sha = subprocess.run(["git", "-C", str(sup), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+            m_sup = copy.deepcopy(GOOD)
+            m_sup["commit"] = sup_sha
+            m_sup["parts"][2]["src"] = ["vendor/src/schema.sql"]
+            errs, ctx = render.check(m_sup, sup, True)
+            self.assertEqual(errs, [])
+            self.assertEqual(ctx["dirty"], set())
+            self.assertIn("vendor/src/schema.sql", ctx.get("unverified", set()))
+            page, _ = render.build(m_sup, sup, ctx)
+            self.assertIn("not verified", page)
+            self.assertNotIn("uncommitted changes", page)
+        finally:
+            tmp_sub.cleanup()
+            tmp_sup.cleanup()
+
+    def test_f5_sha256_full_64_char_commit_accepted(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            root = Path(tmp.name).resolve()
+            (root / "src").mkdir()
+            (root / "docs").mkdir()
+            (root / "src/api.py").write_text("".join(f"line {i}\n" for i in range(1, 13)), encoding="utf-8")
+            (root / "src/schema.sql").write_text("create table orders (id);\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "init", "--object-format=sha256", "-q"], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"], check=True)
+            sha64 = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(len(sha64), 64)
+            m = copy.deepcopy(GOOD)
+            m["commit"] = sha64
+            errs, ctx = render.check(copy.deepcopy(m), root, True)
+            self.assertEqual(errs, [])
+            self.assertEqual(ctx["commit"], sha64)
+            self.assertEqual(ctx["dirty"], set())
+            (root / "src/api.py").write_text("changed\n" * 12, encoding="utf-8")
+            _, ctx2 = render.check(copy.deepcopy(m), root, True)
+            self.assertEqual(ctx2["dirty"], {"src/api.py"})
+        finally:
+            tmp.cleanup()
+        self.assertIn("7–64", Path(__file__).with_name("SKILL.md").read_text(encoding="utf-8"))
+
+    def test_f6_literal_pathspecs_with_glob_chars(self) -> None:
+        tmp, root, m = _make_repo(with_git=True)
+        try:
+            (root / "src/a.py").write_text("a1\na2\n", encoding="utf-8")
+            (root / "src/[ab].py").write_text("b1\nb2\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "glob"], check=True)
+            base_sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+            # Change src/a.py (NOT cited); leave src/[ab].py (cited) untouched.
+            (root / "src/a.py").write_text("changed\na2\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "src/a.py"], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "change a"], check=True)
+            m["commit"] = base_sha
+            m["parts"][1]["src"] = ["src/api.py:1-12", "src/[ab].py:1-2"]
+            errs, ctx = render.check(copy.deepcopy(m), root, True)
+            self.assertEqual(errs, [], f"glob pathspec must not match uncited src/a.py: {errs}")
+            self.assertEqual(ctx["dirty"], set())
+        finally:
+            tmp.cleanup()
+
+    def test_f7_exact_case_required_for_cited_paths(self) -> None:
+        tmp, root, m = _make_repo(with_git=True)
+        try:
+            m_bad = copy.deepcopy(m)
+            m_bad["parts"][1]["src"] = ["SRC/API.py:1-12"]
+            m_bad["flows"][0]["steps"][0]["src"] = "SRC/API.py:1-3"
+            m_bad["flows"][0]["steps"][1]["src"] = "SRC/API.py:5-6"
+            m_bad["flows"][0]["steps"][2]["src"] = "SRC/API.py:8-9"
+            self.assertTrue(render.check(m_bad, root, True)[0], "wrongly cased citation must be refused in git")
+            self.assertTrue(render.check(copy.deepcopy(m_bad), root, False)[0], "wrongly cased citation must be refused without git")
+        finally:
+            tmp.cleanup()
+
+    def test_f8_benign_symlinks_above_root_accepted(self) -> None:
+        tmp, root, m = _make_repo(with_git=True)
+        extra = tempfile.TemporaryDirectory()
+        try:
+            ed = Path(extra.name).resolve()
+            no_chrome = root / "no-chrome"
+            (root / "docs/how-it-works.json").write_text(json.dumps(m), encoding="utf-8")
+
+            # 1) Repository folder itself accessed through a symlink by absolute path.
+            link_repo = ed / "repo-link"
+            link_repo.symlink_to(root)
+            rc1, out1 = _run_main(link_repo / "docs/how-it-works.json", chrome=no_chrome)
+            self.assertEqual(rc1, 0, out1)
+            self.assertTrue((root / "docs/how-it-works.html").exists())
+            (root / "docs/how-it-works.html").unlink()
+
+            # 2) ~/code/proj is a symlink to another git repo while ~ itself is a git repo.
+            home_repo = ed / "home"
+            (home_repo / "code").mkdir(parents=True)
+            subprocess.run(["git", "-C", str(home_repo), "init", "-q"], check=True)
+            (home_repo / "code/proj").symlink_to(root)
+            rc2, out2 = _run_main(home_repo / "code/proj/docs/how-it-works.json", chrome=no_chrome)
+            self.assertEqual(rc2, 0, out2)
+            self.assertTrue((root / "docs/how-it-works.html").exists())
+        finally:
+            tmp.cleanup()
+            extra.cleanup()
+
+    def test_f10_readme_docs_rule_and_page_stamp_on_chrome_none(self) -> None:
+        readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+        checks_sec = readme.split("## What the renderer checks", 1)[1].split("## ", 1)[0]
+        bullets = "\n".join(ln for ln in checks_sec.splitlines() if ln.startswith("- "))
+        self.assertIn("docs/", bullets)
+
+        tmp, root, m = _make_repo(with_git=True)
+        try:
+            map_path = root / "docs/how-it-works.json"
+            map_path.write_text(json.dumps(m), encoding="utf-8")
+            broken_chrome = root / "broken-chrome"
+            broken_chrome.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            broken_chrome.chmod(0o755)
+            rc, out = _run_main(map_path, chrome=broken_chrome, env={"EXPLAIN_CODEBASE_CHROME": "none"})
+            self.assertEqual(rc, 0, out)
+            page = map_path.with_suffix(".html").read_text(encoding="utf-8")
+            header = re.search(r"<header>.*?</header>", page, re.S)
+            self.assertIsNotNone(header)
+            self.assertIn("not checked in a browser", header[0])
+        finally:
+            tmp.cleanup()
 
 
 if __name__ == "__main__":

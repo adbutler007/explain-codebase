@@ -130,7 +130,7 @@ map are always relative to the repository root.
   per group, 1 to 6 flows, 1 to 16 steps per flow, and at most 40 cited lines per step. Text lengths, in characters:
   `label` 30, `verb` 28, `title` 80, `question` 120, `does` 220, `note` 280, `summary` 400, each `unknowns` entry 400. A
   condition too long for a note is usually two steps or a flow of its own.
-- `commit` is the 7–40 character hex commit SHA the code was read at (symbolic names like `HEAD` are refused). Leave it
+- `commit` is the 7–64 character hex commit SHA the code was read at (symbolic names like `HEAD` are refused). Leave it
   out when the subject is not in git.
 - Backticks mark code in `summary`, `question`, `does`, `verb` and `note`. `title` is optional and defaults to the
   directory name.

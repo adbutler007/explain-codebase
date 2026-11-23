@@ -69,10 +69,31 @@ class Cite(NamedTuple):
         return f"{self.path}:{self.a}" + (f"-{self.b}" if self.b != self.a else "")
 
 
+def _git_dir_for(root: Path) -> Path | None:
+    """Resolve the git directory for repo root (.git folder or .git file's gitdir: line). Never follows a .git symlink."""
+    dot_git = root / ".git"
+    try:
+        if dot_git.is_symlink():
+            return None
+        if dot_git.is_dir():
+            return dot_git
+        if dot_git.is_file():
+            first = dot_git.read_bytes()[:4096].splitlines()[0].decode("utf-8").strip()
+            if first.startswith("gitdir:"):
+                target = first[7:].strip()
+                if target and "\x00" not in target:
+                    p = Path(target)
+                    gd = (p if p.is_absolute() else (root.resolve() / p)).resolve()
+                    return gd if gd.is_dir() else None
+    except (OSError, ValueError, UnicodeDecodeError, IndexError):
+        return None
+    return None
+
+
 def git(root: Path, *args: str, raw: bool = False) -> str | None:
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1"}
     cmd = [
-        "git", "--no-pager",
+        "git", "--no-pager", "--literal-pathspecs",
         "-c", "core.fsmonitor=false",
         "-c", "core.hooksPath=/dev/null",
         "-c", "core.quotePath=false",
@@ -82,11 +103,17 @@ def git(root: Path, *args: str, raw: bool = False) -> str | None:
         "-c", "gpg.program=",
         "-c", "gpg.ssh.program=",
         "-c", "gpg.x509.program=",
+        "-c", "protocol.allow=never",
+        "-c", "protocol.file.allow=never",
+        "-c", "protocol.ext.allow=never",
+        "-c", "protocol.ssh.allow=never",
+        "-c", "protocol.git.allow=never",
+        "-c", "protocol.http.allow=never",
+        "-c", "protocol.https.allow=never",
         "-C", str(root),
     ]
     try:
-        git_dir = root / ".git"
-        if git_dir.is_dir() and not git_dir.is_symlink():
+        if git_dir := _git_dir_for(root):
             cmd += [f"--git-dir={git_dir}", f"--work-tree={root}"]
         cmd.extend(args)
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=GIT_TIMEOUT, env=env)
@@ -98,66 +125,138 @@ def git(root: Path, *args: str, raw: bool = False) -> str | None:
 
 
 def find_root(map_path: Path) -> tuple[Path, bool]:
-    git_dir = git(map_path.parent, "rev-parse", "--absolute-git-dir")
-    if git_dir:
-        return Path(git_dir).parent, True
+    """First ancestor of map_path holding .git (folder or file), else the map's project folder."""
+    cur = map_path.parent
+    while True:
+        if _git_dir_for(cur) is not None:
+            return cur, True
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
     d = map_path.parent
     return (d.parent if d.name == "docs" else d), False
 
 
-def _blob_id(f: Path, alg: str = "sha1", symlink: bool = False) -> str | None:
-    """Compute git's blob id for f without filters; return None if unreadable or over MAX_FILE_BYTES."""
+def _blob_status(f: Path, head_sha: str, alg: str, normalize: str, symlink: bool = False) -> str:
+    """Compare f against head_sha without filters; return 'clean', 'dirty', or 'unverified' (if > MAX_FILE_BYTES)."""
     try:
         if symlink:
             data = os.fsencode(os.readlink(f))
-            return hashlib.new(alg, f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
+            sha = hashlib.new(alg, f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
+            return "clean" if sha == head_sha else "dirty"
         st = f.lstat()
-        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_FILE_BYTES:
-            return None
-        h = hashlib.new(alg)
-        h.update(f"blob {st.st_size}\0".encode("ascii"))
-        total = 0
+        if not stat.S_ISREG(st.st_mode):
+            return "dirty"
+        if st.st_size > MAX_FILE_BYTES:
+            return "unverified"
         with f.open("rb") as fp:
-            while chunk := fp.read(65536):
-                total += len(chunk)
-                if total > st.st_size:
-                    return None
-                h.update(chunk)
-        return h.hexdigest() if total == st.st_size else None
+            raw_data = fp.read(MAX_FILE_BYTES + 1)
+        if len(raw_data) > MAX_FILE_BYTES:
+            return "unverified"
     except OSError:
-        return None
+        return "dirty"
+    if hashlib.new(alg, f"blob {len(raw_data)}\0".encode("ascii") + raw_data).hexdigest() == head_sha:
+        return "clean"
+    if normalize == "always" or (normalize == "auto" and b"\x00" not in raw_data[:8000]):
+        norm = raw_data.replace(b"\r\n", b"\n")
+        if hashlib.new(alg, f"blob {len(norm)}\0".encode("ascii") + norm).hexdigest() == head_sha:
+            return "clean"
+    return "dirty"
 
 
-def _dirty_cited(root: Path, paths: list[str], alg: str = "sha1") -> set[str]:
-    """Cited files with uncommitted changes, without git status or configured filters."""
+def _check_attrs(root: Path, files: list[str]) -> dict[str, dict[str, str]]:
+    """Read text/eol/filter/binary gitattributes via git check-attr (runs no filters)."""
+    out: dict[str, dict[str, str]] = {}
+    if not files:
+        return out
+    res = git(root, "check-attr", "-z", "text", "eol", "filter", "binary", "--", *files, raw=True)
+    if not res:
+        return out
+    toks = res.split("\0")
+    for i in range(0, len(toks) - 2, 3):
+        out.setdefault(toks[i], {})[toks[i + 1]] = toks[i + 2]
+    return out
+
+
+def _in_submodule(root: Path, rel: str, submodules: set[str]) -> bool:
+    if rel.rstrip("/") in submodules:
+        return True
+    cur = Path(rel)
+    for anc in cur.parents:
+        if str(anc) == ".":
+            break
+        ap = anc.as_posix()
+        if ap in submodules or _git_dir_for(root / anc) is not None:
+            return True
+    return False
+
+
+def _dirty_cited(root: Path, paths: list[str], alg: str = "sha1") -> tuple[set[str], set[str], str | None]:
+    """Return (dirty, unverified, git_error) for cited paths without running git status or filters."""
     if not paths:
-        return set()
+        return set(), set(), None
+    tree_raw = git(root, "ls-tree", "-r", "-z", "HEAD", "--", *paths, raw=True)
+    idx_raw = git(root, "ls-files", "-s", "-z", "--", *paths, raw=True)
+    others_raw = git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", *paths, raw=True)
+    if tree_raw is None or idx_raw is None or others_raw is None:
+        return set(), set(), "git ls-tree/ls-files failed; could not verify cited files against HEAD"
+
     head_blobs: dict[str, tuple[str, str]] = {}
-    for rec in filter(None, (git(root, "ls-tree", "-r", "-z", "HEAD", "--", *paths, raw=True) or "").split("\0")):
+    for rec in filter(None, tree_raw.split("\0")):
         meta, _, rel = rec.partition("\t")
         parts = meta.split(" ")
         if len(parts) == 3 and rel:
             head_blobs[rel] = (parts[0], parts[2])
     idx_blobs: dict[str, set[str]] = defaultdict(set)
-    for rec in filter(None, (git(root, "ls-files", "-s", "-z", "--", *paths, raw=True) or "").split("\0")):
+    for rec in filter(None, idx_raw.split("\0")):
         meta, _, rel = rec.partition("\t")
         parts = meta.split(" ")
         if len(parts) >= 2 and rel:
             idx_blobs[rel].add(parts[1])
-    dirty = {rel for rel in (git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", *paths, raw=True) or "").split("\0") if rel}
+
+    submodules = {rel for rel, (mode, _) in head_blobs.items() if mode == "160000"}
+    dirty: set[str] = set()
+    unverified: set[str] = set()
+    for rel in filter(None, others_raw.split("\0")):
+        (unverified if _in_submodule(root, rel, submodules) else dirty).add(rel)
     for p in paths:
-        if not p.endswith("/") and p not in head_blobs:
-            dirty.add(p)
-    for rel in set(head_blobs) | set(idx_blobs):
+        if p.endswith("/"):
+            if _git_dir_for(root / p.rstrip("/")) is not None:
+                unverified.add(p.rstrip("/"))
+        elif p not in head_blobs:
+            (unverified if _in_submodule(root, p, submodules) else dirty).add(p)
+
+    tracked = sorted(set(head_blobs) | set(idx_blobs))
+    attrs = _check_attrs(root, [r for r in tracked if r in head_blobs and head_blobs[r][0] not in ("120000", "160000")])
+    autocrlf = (git(root, "config", "--get", "core.autocrlf") or "").strip().lower()
+    for rel in tracked:
         if rel not in head_blobs:
             dirty.add(rel)
             continue
         mode, head_sha = head_blobs[rel]
         if idx_blobs.get(rel) != {head_sha}:
             dirty.add(rel)
-        elif mode != "160000" and _blob_id(root / rel, alg, symlink=(mode == "120000")) != head_sha:
+            continue
+        if mode == "160000":
+            unverified.add(rel)
+            continue
+        a = attrs.get(rel, {})
+        filtered = a.get("filter", "unspecified") not in ("unspecified", "unset")
+        if a.get("binary") == "set" or a.get("text") == "unset":
+            norm = "never"
+        elif a.get("text") == "set" or a.get("eol", "unspecified") not in ("unspecified", "unset"):
+            norm = "always"
+        elif a.get("text") == "auto" or autocrlf in ("true", "input"):
+            norm = "auto"
+        else:
+            norm = "never"
+        status = _blob_status(root / rel, head_sha, alg, norm, symlink=(mode == "120000"))
+        if status == "unverified" or (status == "dirty" and filtered):
+            unverified.add(rel)
+        elif status == "dirty":
             dirty.add(rel)
-    return dirty
+    return dirty, unverified, None
 
 
 def _count_lines(f: Path, limit: int = MAX_FILE_BYTES) -> int | None:
@@ -183,21 +282,63 @@ def _count_lines(f: Path, limit: int = MAX_FILE_BYTES) -> int | None:
     return lines + (1 if total and last != b"\n" else 0)
 
 
-def _bad_text(s: str) -> str | None:
-    """Return a reason if s contains characters whose layout or width cannot be bounded, else None."""
-    marks = 0
-    for ch in s:
+_ALLOWED_CF = frozenset("\u00ad\u061c\u200c\u200d\u200e\u200f")
+_BIDI_BAD = frozenset(range(0x202A, 0x202F)) | frozenset(range(0x2066, 0x206A))
+
+
+def _is_generic_mark(cp: int) -> bool:
+    return (0x0300 <= cp <= 0x036F or 0x1AB0 <= cp <= 0x1AFF or 0x1DC0 <= cp <= 0x1DFF
+            or 0x20D0 <= cp <= 0x20FF or 0xFE20 <= cp <= 0xFE2F)
+
+
+def _is_unbounded_script(cp: int) -> bool:
+    return (0x12000 <= cp <= 0x1254F or 0x13000 <= cp <= 0x1345F
+            or 0x14400 <= cp <= 0x1467F or 0x1D800 <= cp <= 0x1DAAF)
+
+
+def _emoji_tag_spans(s: str) -> set[int]:
+    """Indices of tag characters (U+E0020-E007F) inside valid UTS #51 emoji tag sequences (U+1F3F4 ... U+E007F)."""
+    ok: set[int] = set()
+    i, n = 0, len(s)
+    while i < n:
+        if ord(s[i]) == 0x1F3F4:
+            j = i + 1
+            while j < n and 0xE0020 <= ord(s[j]) <= 0xE007E:
+                j += 1
+            if j > i + 1 and j < n and ord(s[j]) == 0xE007F:
+                ok.update(range(i + 1, j + 1))
+                i = j + 1
+                continue
+        i += 1
+    return ok
+
+
+def _bad_text(s: str, check_limits: bool = True) -> str | None:
+    """Return a reason if s contains disallowed control/bidi/surrogate/private-use chars or unbounded marks/scripts."""
+    tag_ok = _emoji_tag_spans(s)
+    marks = gen_marks = 0
+    for i, ch in enumerate(s):
         cp = ord(ch)
         cat = unicodedata.category(ch)
-        if cat[0] == "C" or cat in ("Zl", "Zp"):
-            return f"contains disallowed control, format or invalid character U+{cp:04X}"
+        if cat in ("Cc", "Cs", "Co", "Zl", "Zp") or cp in _BIDI_BAD:
+            return f"contains disallowed control, bidi, surrogate or private-use character U+{cp:04X}"
+        if cat == "Cf":
+            if ch in _ALLOWED_CF or i in tag_ok:
+                continue
+            return f"contains disallowed format character U+{cp:04X}"
+        if not check_limits:
+            continue
         if cat[0] == "M":
             marks += 1
-            if marks > 2:
+            if _is_generic_mark(cp):
+                gen_marks += 1
+            if gen_marks > 2:
                 return "has more than two combining marks on one character"
+            if marks > 4:
+                return "has more than four combining marks on one character"
             continue
-        marks = 0
-        if 0x10000 <= cp < 0x1F000 or cp >= 0x40000:
+        marks = gen_marks = 0
+        if _is_unbounded_script(cp):
             return f"contains character U+{cp:04X} whose width cannot be bounded"
     return None
 
@@ -209,7 +350,19 @@ def check(m: dict, root: Path, in_git: bool) -> tuple[list[str], dict]:
     bad = errs.append
     cited_by: dict[str, list[str]] = defaultdict(list)
     line_counts: dict[str, int] = {}
+    dir_entries: dict[Path, tuple[set[str], set[str]]] = {}
     root_real = root.resolve()
+
+    def exact_disk_case(parent: Path, name: str) -> bool:
+        cached = dir_entries.get(parent)
+        if cached is None:
+            try:
+                raw_names = set(os.listdir(parent))
+            except OSError:
+                return False
+            cached = (raw_names, {unicodedata.normalize("NFC", n) for n in raw_names})
+            dir_entries[parent] = cached
+        return name in cached[0] or unicodedata.normalize("NFC", name) in cached[1]
 
     def words(obj: dict, key: str, where: str, required: bool = True) -> str:
         v = obj.get(key)
@@ -228,8 +381,8 @@ def check(m: dict, root: Path, in_git: bool) -> tuple[list[str], dict]:
         if not isinstance(s, str):
             bad(f"{where}: {s!r} is not a citation; write path:start-end")
             return None
-        if any(unicodedata.category(ch)[0] == "C" or unicodedata.category(ch) in ("Zl", "Zp") for ch in s):
-            bad(f"{where}: {s!r} contains disallowed control or invalid characters")
+        if reason := _bad_text(s, check_limits=False):
+            bad(f"{where}: {s!r} {reason}")
             return None
         mt = re.fullmatch(r"([^:]+?)(?::(\d{1,9})(?:-(\d{1,9}))?)?", s)
         if not mt:
@@ -243,14 +396,18 @@ def check(m: dict, root: Path, in_git: bool) -> tuple[list[str], dict]:
             return None
         cur = root
         for part in p_obj.parts:
-            cur = cur / part
+            nxt = cur / part
             try:
-                if cur.is_symlink():
+                if nxt.is_symlink():
                     bad(f"{where}: {path} traverses or names a symlink, which cannot be cited")
+                    return None
+                if nxt.exists() and not exact_disk_case(cur, part):
+                    bad(f"{where}: {path} does not match the exact case of a path in {root.name}")
                     return None
             except (OSError, ValueError):
                 bad(f"{where}: {path} cannot be resolved")
                 return None
+            cur = nxt
         f = root / path
         try:
             real = f.resolve()
@@ -450,25 +607,42 @@ def check(m: dict, root: Path, in_git: bool) -> tuple[list[str], dict]:
                     if reason := _bad_text(u):
                         bad(f'unknown {ui + 1}: {reason}')
 
-    ctx = {"groups": groups, "commit": None, "when": date.today().isoformat(), "dirty": set(), "base": None}
+    ctx = {"groups": groups, "commit": None, "when": date.today().isoformat(),
+           "dirty": set(), "unverified": set(), "base": None}
     if in_git:
         head = git(root, "rev-parse", "HEAD")
         commit = m.get("commit")
-        is_hex = isinstance(commit, str) and bool(re.fullmatch(r"[0-9a-fA-F]{7,40}", commit))
+        is_hex = isinstance(commit, str) and bool(re.fullmatch(r"[0-9a-fA-F]{7,64}", commit))
         full = git(root, "rev-parse", "--verify", "--end-of-options", f"{commit}^{{commit}}") if is_hex else None
         if not full or not full.lower().startswith(commit.lower()):
-            bad(f'set "commit" to a 7-40 character hex commit SHA the code was read at (HEAD is {head})')
+            bad(f'set "commit" to a 7-64 character hex commit SHA the code was read at (HEAD is {head})')
         else:
             paths = sorted(cited_by)
-            moved = (git(root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", full, "HEAD", "--", *paths, raw=True) or "") if paths else ""
-            for path in filter(None, moved.split("\0")):
-                who = sorted({w for p, ws in cited_by.items() if path == p or (p.endswith("/") and path.startswith(p)) for w in ws})
-                bad(f'{path} changed since {full[:7]}: re-read it (cited by {"; ".join(who)}), correct the map, '
-                    f'then set "commit" to {head}')
-            alg = "sha256" if head and len(head) == 64 else "sha1"
+            if paths:
+                tracked_raw = git(root, "ls-files", "-z", raw=True)
+                if tracked_raw is None:
+                    bad("git ls-files failed; could not verify cited path casing")
+                else:
+                    tracked = {p for p in tracked_raw.split("\0") if p}
+                    tracked_fold = {p.casefold(): p for p in tracked}
+                    for p in paths:
+                        if not p.endswith("/") and p not in tracked and (match := tracked_fold.get(p.casefold())):
+                            bad(f'{p}: does not match the exact case of tracked file "{match}"')
+                moved = git(root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", full, "HEAD", "--", *paths, raw=True)
+                if moved is None:
+                    bad("git diff failed; could not check whether cited files changed since the recorded commit")
+                else:
+                    for path in filter(None, moved.split("\0")):
+                        who = sorted({w for p, ws in cited_by.items() if path == p or (p.endswith("/") and path.startswith(p)) for w in ws})
+                        bad(f'{path} changed since {full[:7]}: re-read it (cited by {"; ".join(who)}), correct the map, '
+                            f'then set "commit" to {head}')
+            alg = "sha256" if len(full) == 64 else "sha1"
+            dirty, unverified, dirty_err = _dirty_cited(root, paths, alg)
+            if dirty_err:
+                bad(dirty_err)
             when = git(root, "show", "-s", "--no-ext-diff", "--no-textconv", "--format=%cs", "--end-of-options", full)
             ctx.update(commit=full, when=when or ctx["when"],
-                       dirty=_dirty_cited(root, paths, alg), base=github_base(root, full))
+                       dirty=dirty, unverified=unverified, base=github_base(root, full))
     return errs, ctx
 
 
@@ -513,8 +687,6 @@ def _glyph_w(ch: str, expand: bool = True) -> float:
         return 1.35
     if unicodedata.east_asian_width(ch) in ("W", "F"):
         return 1.08
-    if cat == "Mc":
-        return 1.7
     if cat == "Me":
         return 1.0
     if expand and ord(ch) > 127:
@@ -1649,8 +1821,13 @@ def build(m: dict, root: Path, ctx: dict) -> tuple[str, dict]:
         stamp = f'Describes commit {ref} of {esc(ctx["when"])}'
         if ctx["dirty"]:
             stamp += f', plus uncommitted changes in {len(ctx["dirty"])} cited file{"s" if len(ctx["dirty"]) > 1 else ""}'
+        if ctx.get("unverified"):
+            n = len(ctx["unverified"])
+            stamp += f', with {n} cited file{"s" if n > 1 else ""} not verified'
     else:
         stamp = f'Describes the files as they were on {esc(ctx["when"])}'
+    if ctx.get("unchecked_browser"):
+        stamp += " (not checked in a browser)"
     kinds = {p["kind"] for p in parts}
     shown = [("code", "code" in kinds), ("data", "store" in kinds), ("person or event", "actor" in kinds),
              ("group, click to open", bool(groups)), ("outside the repository, or not seen", True)]
@@ -1963,13 +2140,15 @@ def _write_atomic(out: Path, text: str) -> None:
 
 
 def _has_symlink_component(start: Path, root_real: Path) -> bool:
-    """True if start or any ancestor down from root_real is a symlink, or if root_real is never reached."""
+    """True if start or any directory strictly below root_real is a symlink, or if root_real is never reached."""
+    if start.is_symlink():
+        return True
     cur = start
     while True:
-        if cur.is_symlink():
-            return True
         if cur.resolve() == root_real:
             return False
+        if cur.is_symlink():
+            return True
         parent = cur.parent
         if parent == cur:
             return True
@@ -1977,14 +2156,18 @@ def _has_symlink_component(start: Path, root_real: Path) -> bool:
 
 
 def _symlink_inside_enclosing_repo(raw_src: Path) -> Path | None:
-    """If a lexical ancestor of raw_src contains .git and a symlink lies below it, return that symlink."""
+    """If a lexical ancestor of raw_src holds .git and a symlink lies strictly below it, return that symlink."""
     sym: Path | None = None
     cur = raw_src
     while True:
+        if cur != raw_src:
+            dot_git = cur / ".git"
+            if dot_git.is_symlink():
+                return dot_git
+            if dot_git.exists():
+                return sym
         if cur.is_symlink():
             sym = sym or cur
-        elif (cur / ".git").exists() or (cur / ".git").is_symlink():
-            return sym
         parent = cur.parent
         if parent == cur:
             return None
@@ -1996,18 +2179,11 @@ def main() -> int:
         print(__doc__)
         return 2
     arg = sys.argv[1]
-    if "\x00" in arg or any(unicodedata.category(ch)[0] == "C" for ch in arg):
+    if "\x00" in arg or _bad_text(arg, check_limits=False):
         print(f"error: invalid map path {arg!r}; nothing written.")
         return 1
     try:
         raw_src = Path(os.path.abspath(arg))
-        if not os.path.isabs(arg):
-            cur = Path.cwd()
-            for part in Path(arg).parts:
-                cur = cur / part
-                if cur.is_symlink():
-                    print(f"error: {raw_src} traverses symlink {cur}; nothing written.")
-                    return 1
         if sym := _symlink_inside_enclosing_repo(raw_src):
             print(f"error: {raw_src} traverses symlink {sym} inside the repository; nothing written.")
             return 1
@@ -2023,7 +2199,7 @@ def main() -> int:
         if out == src_real:
             print(f"error: {raw_src} must not already end with .html; nothing written.")
             return 1
-        if in_git and (root_real / ".git").is_symlink():
+        if (root_real / ".git").is_symlink():
             print(f"error: {root_real / '.git'} must not be a symlink; nothing written.")
             return 1
     except (OSError, ValueError) as e:
@@ -2047,11 +2223,13 @@ def main() -> int:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as e:
         print(f"error: cannot read {raw_src}: {e}")
         return 1
+    chrome_opt_out = (os.environ.get("EXPLAIN_CODEBASE_CHROME") or "").strip().lower() == "none"
     errs, ctx = check(m, root, in_git and git(root, "rev-parse", "HEAD") is not None)
     if errs:
         print(*(f"error: {e}" for e in errs), sep="\n")
         print(f"{len(errs)} to fix; nothing written.")
         return 1
+    ctx["unchecked_browser"] = chrome_opt_out
     try:
         page, counts = build(m, root, ctx)
     except LayoutError as e:
@@ -2083,7 +2261,6 @@ def main() -> int:
         print(f"error: cannot write {out}: {e}; nothing written.")
         return 1
     print(f"{out}  ({', '.join(f'{n} {k}' for k, n in counts.items())})")
-    chrome_opt_out = (os.environ.get("EXPLAIN_CODEBASE_CHROME") or "").strip().lower() == "none"
     if shots:
         print("screenshots, one per flow on the overview, then one per group:", *shots, sep="\n  ")
     elif chrome_opt_out:
