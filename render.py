@@ -1792,7 +1792,7 @@ def build(m: dict, root: Path, ctx: dict) -> tuple[str, dict]:
                         f'<div><b>{pair}</b><span>{rich(s["verb"])} {src}</span>{note}<small></small></div></li>')
             if not s["_src"]:
                 unseen.append(f'{pair}: {rich(s["verb"])}. Believed, but not seen in the code.')
-        flow_html.append(f'<details name="flow"{" open" if i == 0 else ""}><summary>{rich(f["question"])}</summary>'
+        flow_html.append(f'<details name="flow"{" open" if i == 0 else ""}><summary><span>{rich(f["question"])}</span></summary>'
                          f'<ol>{"".join(rows)}</ol></details>')
 
     def part_html(p: dict) -> str:

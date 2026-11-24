@@ -1705,5 +1705,20 @@ class ReplayFixes(unittest.TestCase):
             tmp.cleanup()
 
 
+
+class QuestionMarkup(unittest.TestCase):
+    """A question is one line of text: the summary row is a flex box, so its words must sit in one child.
+
+    A question with code in it once split into columns, one per piece of code.
+    """
+
+    def test_question_text_is_one_flex_item(self) -> None:
+        html = render.esc  # keep the import visible to readers
+        out = render.rich("What happens when I run `train.py`?")
+        wrapped = f"<summary><span>{out}</span></summary>"
+        src = Path(render.__file__).read_text(encoding="utf-8")
+        self.assertIn('<summary><span>{rich(f["question"])}</span></summary>', src)
+        self.assertIn("<code>", wrapped)
+
 if __name__ == "__main__":
     unittest.main()

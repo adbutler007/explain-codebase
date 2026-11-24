@@ -6,6 +6,16 @@ The page has two things on it: a **map** of the code's parts, and a few **flows*
 
 Large codebases are drawn at two levels. The overview shows at most ten boxes; parts that work together form a group, which the reader clicks to open into a picture of its own.
 
+![nanoGPT, light theme: the question "What happens when I train or finetune a model with train.py?" drawn as numbered steps on the map, with each step cited to its lines in train.py](docs/images/nanogpt-train.png)
+
+*[karpathy/nanoGPT](https://github.com/karpathy/nanoGPT) at commit `3adf61e`, with one question open. Each numbered step is an arrow on the map, and each step in the list links to the lines it cites.*
+
+![simonw/llm, dark theme: the "Prompt & tool runtime" group opened, showing the steps of "What happens when I run llm 'a prompt'?" that happen inside it](docs/images/llm-group.png)
+
+*[simonw/llm](https://github.com/simonw/llm) at commit `46f0461`, with a group opened from the overview. Steps drawn in other pictures stay in the list as short lines that link to the picture that draws them.*
+
+Both pages were written by an agent following `SKILL.md`, and the renderer accepted them on their first render.
+
 ## What the renderer checks
 
 `render.py` reads the map the agent writes (`docs/how-it-works.json`) and refuses to draw it, listing the problems found, when:
